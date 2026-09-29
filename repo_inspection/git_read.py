@@ -29,15 +29,85 @@ class UnsafeGitDirectory(Exception):
     configured root, so Git inspection is refused (fail closed)."""
 
 
+MAX_GIT_METADATA_ENTRIES = 200_000
+
+
+def _inside(root_resolved: Path, path: Path, what: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise UnsafeGitDirectory(f"{what} could not be resolved: {str(path)!r}") from None
+    if not is_within(root_resolved, resolved):
+        raise UnsafeGitDirectory(f"{what} resolves outside the repository root: {str(path)!r}")
+    return resolved
+
+
+def _pointer(file: Path) -> str:
+    """First line of a small in-repository pointer file (gitfile / commondir)."""
+    if file.stat().st_size > 4096:
+        raise UnsafeGitDirectory(f"{file.name} pointer file is unexpectedly large")
+    lines = file.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+    if not lines or not lines[0].strip() or lines[0].strip() == "gitdir:":
+        raise UnsafeGitDirectory(f"{file.name} pointer file is empty")
+    return lines[0].strip()
+
+
+def _validate_layout(root: Path) -> None:
+    """Validate the Git layout BEFORE dulwich opens anything.
+
+    Verified against dulwich 0.22.8: Repo() follows a `.git` gitfile (`gitdir:`),
+    a `commondir` file and `objects/info/alternates`, and reads through any
+    link/junction inside the metadata directories. Checking only after Repo()
+    returns (as before) still let the constructor read the redirected config.
+    Here every pointer is resolved by the application first, and only in-root
+    pointer files are ever read."""
+    root_resolved = root.resolve()
+    dot_git = root / ".git"
+    if not os.path.lexists(dot_git):
+        return                                   # not a Git repository: Repo() will say so
+    if dot_git.is_file():
+        line = _pointer(dot_git)
+        if not line.startswith("gitdir:"):
+            raise UnsafeGitDirectory(".git file is not a gitdir pointer")
+        control = _inside(root_resolved, root / line[len("gitdir:"):].strip(), "git control directory")
+    else:
+        control = _inside(root_resolved, dot_git, "git control directory")
+    common = control
+    if (control / "commondir").is_file():
+        common = _inside(root_resolved, control / _pointer(control / "commondir"), "git common directory")
+    info = common / "objects" / "info"
+    if os.path.lexists(info / "http-alternates"):
+        raise UnsafeGitDirectory("objects/info/http-alternates is not supported")
+    if (info / "alternates").is_file():
+        for line in (info / "alternates").read_text(encoding="utf-8", errors="replace").splitlines():
+            entry = line.strip()
+            if entry and not entry.startswith("#"):
+                _inside(root_resolved, (common / "objects" / entry), "git alternate object directory")
+    # No link/junction inside the metadata may lead outside the root.
+    seen = 0
+    for base in {control, common}:
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            for name in dirnames + filenames:
+                seen += 1
+                if seen > MAX_GIT_METADATA_ENTRIES:
+                    raise UnsafeGitDirectory("git metadata too large to validate")
+                entry = Path(dirpath) / name
+                try:
+                    real = entry.resolve()
+                except (OSError, RuntimeError):
+                    raise UnsafeGitDirectory(f"git metadata entry could not be resolved: {name!r}") from None
+                if not is_within(root_resolved, real):
+                    raise UnsafeGitDirectory(f"git metadata entry links outside the repository root: {name!r}")
+
+
 def _open(root: Path) -> Repo:
+    _validate_layout(Path(root))
     try:
         repo = Repo(str(root))
     except NotGitRepository as e:
         raise NotAGitRepository(str(root)) from e
-    # A `.git` gitfile (gitdir:) or a `commondir` entry can point the control
-    # and common directories anywhere (linked worktrees, submodules). Dulwich
-    # honours both, so without this check a malicious repository layout could
-    # redirect object/ref/index/config reads outside the configured root.
+    # Defense in depth: _validate_layout() already proved the layout stays in
+    # the root before dulwich opened it; re-check what dulwich actually chose.
     # `core.worktree` is NOT honoured by dulwich 0.22.x (`Repo.path` is always
     # the root passed in), so only controldir/commondir need to be checked.
     root_resolved = Path(root).resolve()

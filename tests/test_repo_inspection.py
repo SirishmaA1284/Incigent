@@ -406,6 +406,55 @@ class TestGitConfigSafety:
         (repo / ".git" / "commondir").write_text(str(outside).replace("\\", "/") + "\n")
         assert refused(RepositoryInspector(str(repo)), {"operation": "inspect_git_status"}) == "unsafe_gitdir"
 
+    def test_escaping_layout_is_refused_before_dulwich_reads_anything(self, tmp_path, monkeypatch):
+        """Regression: the layout must be validated BEFORE Repo() runs, because
+        Repo()'s constructor already reads the redirected config/object store."""
+        import repo_inspection.git_read as git_read
+        repo = make_repo(tmp_path)
+        outside = tmp_path / "evil-gitdir"
+        outside.mkdir()
+        (repo / ".git" / "commondir").write_text(str(outside).replace("\\", "/") + "\n")
+        opened = []
+        monkeypatch.setattr(git_read, "Repo", lambda *a, **k: opened.append(a) or pytest.fail("Repo() was called"))
+        assert refused(RepositoryInspector(str(repo)), {"operation": "inspect_git_status"}) == "unsafe_gitdir"
+        assert opened == []
+
+    def test_alternates_outside_root_are_refused(self, tmp_path):
+        """dulwich reads objects from every directory listed in objects/info/alternates."""
+        repo = make_repo(tmp_path)
+        outside = tmp_path / "foreign-objects"
+        outside.mkdir()
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        for entry in (str(outside).replace("\\", "/"), "../../../foreign-objects"):
+            (repo / ".git" / "objects" / "info" / "alternates").write_text(entry + "\n")
+            assert refused(RepositoryInspector(str(repo)), {"operation": "inspect_git_status"}) == "unsafe_gitdir"
+
+    def test_http_alternates_are_refused(self, tmp_path):
+        repo = make_repo(tmp_path)
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "objects" / "info" / "http-alternates").write_text("https://example.invalid/objects\n")
+        assert refused(RepositoryInspector(str(repo)), {"operation": "inspect_recent_commits", "count": 1}) == "unsafe_gitdir"
+
+    def test_link_inside_git_metadata_escaping_root_is_refused(self, tmp_path):
+        """A junction/symlink inside .git (e.g. a refs or objects subdirectory)
+        pointing outside the root must not be followed."""
+        repo = make_repo(tmp_path)
+        outside = tmp_path / "outside-refs"
+        outside.mkdir()
+        make_outside_link(repo / ".git" / "refs" / "evil", outside)
+        before = tree_digest(outside)
+        for op in ({"operation": "inspect_git_status"}, {"operation": "inspect_recent_commits", "count": 1},
+                   {"operation": "inspect_diff"}):
+            assert refused(RepositoryInspector(str(repo)), op) == "unsafe_gitdir"
+        assert tree_digest(outside) == before
+
+    @pytest.mark.parametrize("content", ["", "gitdir:", "not-a-gitdir-line"])
+    def test_malformed_gitfile_is_refused(self, tmp_path, content):
+        repo = make_repo(tmp_path)
+        write_gitfile(repo, ".git-real")
+        (repo / ".git").write_text(content)
+        assert refused(RepositoryInspector(str(repo)), {"operation": "inspect_git_status"}) == "unsafe_gitdir"
+
     def test_core_worktree_is_ignored_by_dulwich(self, tmp_path):
         """dulwich 0.22.x has no core.worktree support: the worktree stays the
         configured root no matter what the repository's config says."""
