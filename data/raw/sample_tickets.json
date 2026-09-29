@@ -1,0 +1,43 @@
+[
+  {
+    "id": "INC-4821",
+    "title": "P1: Production DB connection pool exhausted — full outage",
+    "description": "DB primary unreachable. All API endpoints returning 503. Triggered at 02:08 UTC. Connection pool at max capacity (200/200). Root cause suspected: connection leak introduced in order-service v2.4.1 deployed at 01:45 UTC.",
+    "status": "resolved",
+    "priority": "P1",
+    "created_at": "2024-03-15T02:10:05Z",
+    "resolved_at": "2024-03-15T02:20:03Z",
+    "assignee": "rahul.sre",
+    "labels": ["database", "production", "outage", "connection-pool"]
+  },
+  {
+    "id": "TASK-5102",
+    "title": "Fix: Close DB transaction in order-service exception handler",
+    "description": "The retry logic added in v2.4.1 failed to call conn.commit() or conn.rollback() inside the except block, causing connections to remain open in idle_in_transaction state indefinitely. Fix: wrap transaction in context manager to guarantee cleanup.",
+    "status": "in_progress",
+    "priority": "P1",
+    "created_at": "2024-03-15T02:21:00Z",
+    "assignee": "arjun.backend",
+    "labels": ["bug", "order-service", "database", "connection-leak"]
+  },
+  {
+    "id": "TASK-5103",
+    "title": "Add alert: DB connection pool > 70% capacity",
+    "description": "We had no alert until pool was 100% full. Add a warning alert at 70% and critical at 90% so on-call has time to investigate before outage.",
+    "status": "open",
+    "priority": "P2",
+    "created_at": "2024-03-15T02:22:00Z",
+    "assignee": "priya.oncall",
+    "labels": ["monitoring", "alerting", "database"]
+  },
+  {
+    "id": "TASK-5104",
+    "title": "Add DB connection pool settings to deployment checklist",
+    "description": "Any service touching DB should specify DB_POOL_MAX and DB_IDLE_TIMEOUT explicitly. Add to PR template and deployment runbook.",
+    "status": "open",
+    "priority": "P3",
+    "created_at": "2024-03-15T02:23:00Z",
+    "assignee": "maya.vp.eng",
+    "labels": ["process", "deployment", "runbook"]
+  }
+]

@@ -1,0 +1,41 @@
+2024-03-15 02:01:03 INFO  [db-primary] PostgreSQL 15.2 on x86_64-pc-linux-gnu
+2024-03-15 02:01:45 INFO  [api-gateway] Request rate: 342 req/s (normal baseline)
+2024-03-15 02:03:11 INFO  [db-primary] Checkpoint complete: wrote 1823 buffers
+2024-03-15 02:07:22 WARN  [db-primary] Connection pool at 78% capacity (156/200)
+2024-03-15 02:08:01 WARN  [db-primary] Slow query detected: SELECT * FROM orders WHERE user_id=? took 4823ms
+2024-03-15 02:08:14 WARN  [db-primary] Slow query detected: SELECT * FROM orders WHERE user_id=? took 6201ms
+2024-03-15 02:08:33 ERROR [db-primary] Connection pool exhausted: 200/200 connections active
+2024-03-15 02:08:33 ERROR [api-gateway] Upstream DB timeout after 5000ms on /api/v1/orders
+2024-03-15 02:08:34 ERROR [api-gateway] Upstream DB timeout after 5000ms on /api/v1/users
+2024-03-15 02:08:34 ERROR [api-gateway] Upstream DB timeout after 5000ms on /api/v1/products
+2024-03-15 02:08:35 CRITICAL [db-primary] FATAL: max_connections limit reached — refusing new connections
+2024-03-15 02:08:35 CRITICAL [api-gateway] Health check FAILED for db-primary:5432
+2024-03-15 02:08:36 ERROR [auth-service] Cannot connect to DB: connection refused on 10.0.1.5:5432
+2024-03-15 02:08:36 ERROR [order-service] DB write failed for order ORD-928371: connection refused
+2024-03-15 02:08:37 ERROR [payment-service] Transaction rollback: DB unavailable — order ORD-928372 NOT charged
+2024-03-15 02:08:38 CRITICAL [api-gateway] Circuit breaker OPEN for db-primary after 5 consecutive failures
+2024-03-15 02:08:39 ERROR [api-gateway] 503 Service Unavailable — returned to 1,204 requests in last 10s
+2024-03-15 02:09:01 WARN  [db-replica-1] Replication lag: 47 seconds behind primary
+2024-03-15 02:09:14 WARN  [db-replica-1] Replication lag: 112 seconds behind primary
+2024-03-15 02:09:22 ERROR [db-replica-1] Replication stream disconnected from primary
+2024-03-15 02:10:05 INFO  [ops-bot] PagerDuty alert fired: DB_POOL_EXHAUSTED — P1 incident created
+2024-03-15 02:10:06 INFO  [ops-bot] On-call engineer notified: @rahul.sre via PagerDuty
+2024-03-15 02:12:44 INFO  [rahul.sre] SSH session opened to db-primary (10.0.1.5)
+2024-03-15 02:13:01 INFO  [db-primary] Admin query: SELECT count(*), state FROM pg_stat_activity GROUP BY state
+2024-03-15 02:13:03 INFO  [db-primary] Query result: 197 connections in state=idle_in_transaction
+2024-03-15 02:13:15 WARN  [db-primary] Identified cause: connection leak in order-service v2.4.1 — transactions not released
+2024-03-15 02:14:02 INFO  [rahul.sre] Executing: SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle_in_transaction' AND query_start < NOW() - INTERVAL '2 minutes'
+2024-03-15 02:14:03 INFO  [db-primary] Terminated 183 idle_in_transaction connections
+2024-03-15 02:14:04 INFO  [db-primary] Connection pool: 14/200 active — recovered
+2024-03-15 02:14:10 INFO  [api-gateway] Circuit breaker HALF-OPEN — testing db-primary
+2024-03-15 02:14:11 INFO  [api-gateway] Health check PASSED for db-primary:5432
+2024-03-15 02:14:12 INFO  [api-gateway] Circuit breaker CLOSED — traffic restored to db-primary
+2024-03-15 02:14:15 INFO  [order-service] DB connection re-established
+2024-03-15 02:14:16 INFO  [auth-service] DB connection re-established
+2024-03-15 02:14:20 INFO  [api-gateway] Request rate normalising: 289 req/s
+2024-03-15 02:15:00 INFO  [db-replica-1] Replication stream reconnected — catching up (lag: 89s)
+2024-03-15 02:16:30 INFO  [db-replica-1] Replication fully caught up — lag: 0s
+2024-03-15 02:17:01 INFO  [rahul.sre] Rolling restart initiated for order-service to apply connection pool fix
+2024-03-15 02:19:45 INFO  [order-service] Restarted with DB_POOL_MAX=20, DB_IDLE_TIMEOUT=30s
+2024-03-15 02:20:01 INFO  [api-gateway] All services healthy — incident resolved
+2024-03-15 02:20:03 INFO  [ops-bot] PagerDuty incident INC-4821 marked resolved (duration: 11m 28s)

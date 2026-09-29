@@ -1,0 +1,20 @@
+[
+  {"ts": "1710468203.000001", "user": "priya.oncall", "text": "🚨 ALERT: Getting PagerDuty for DB_POOL_EXHAUSTED on prod. Anyone else seeing this?"},
+  {"ts": "1710468215.000002", "user": "rahul.sre", "text": "Yeah I'm getting paged too. Looking now"},
+  {"ts": "1710468228.000003", "user": "arjun.backend", "text": "order-service is throwing 503s, users can't checkout. Seeing it in Datadog"},
+  {"ts": "1710468241.000004", "user": "priya.oncall", "text": "Declaring P1. @channel — production DB is down. War room in #incident-4821"},
+  {"ts": "1710468267.000005", "user": "rahul.sre", "text": "SSHed into db-primary. Connection pool is full — 200/200. All idle_in_transaction"},
+  {"ts": "1710468289.000006", "user": "arjun.backend", "text": "Wait — we deployed order-service v2.4.1 at 01:45. Could that be it?"},
+  {"ts": "1710468301.000007", "user": "rahul.sre", "text": "Checking pg_stat_activity... yes. 197 connections stuck in idle_in_transaction. This is a connection leak"},
+  {"ts": "1710468315.000008", "user": "priya.oncall", "text": "Arjun what changed in v2.4.1?"},
+  {"ts": "1710468334.000009", "user": "arjun.backend", "text": "Added retry logic to order creation. I think I forgot to close the transaction in the exception handler 😬"},
+  {"ts": "1710468342.000010", "user": "rahul.sre", "text": "Killing idle_in_transaction connections now to restore service"},
+  {"ts": "1710468363.000011", "user": "rahul.sre", "text": "Done. Pool is back to 14/200. API gateway circuit breaker should close soon"},
+  {"ts": "1710468375.000012", "user": "priya.oncall", "text": "Datadog showing 503s dropping. Looks like we're recovering 🤞"},
+  {"ts": "1710468391.000013", "user": "arjun.backend", "text": "Orders are going through again. Confirming on my end"},
+  {"ts": "1710468401.000014", "user": "rahul.sre", "text": "Going to rolling restart order-service with a proper connection pool config — max 20 conns, idle timeout 30s"},
+  {"ts": "1710468585.000015", "user": "rahul.sre", "text": "Restart complete. order-service v2.4.1 with hotfix running. All healthy"},
+  {"ts": "1710468603.000016", "user": "priya.oncall", "text": "Resolving P1. Total downtime: ~11 minutes. Post-mortem due by EOD. Arjun owns the fix PR"},
+  {"ts": "1710468621.000017", "user": "arjun.backend", "text": "On it. PR will have the transaction fix + added connection pool monitoring alert so we catch this earlier next time"},
+  {"ts": "1710468640.000018", "user": "maya.vp.eng", "text": "Thanks team. Fast response. Let's make sure post-mortem captures the deploy → leak → outage chain clearly"}
+]
