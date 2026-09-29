@@ -6,6 +6,11 @@ Edge cases: missing API key, empty timeline, tool failures, JSON parse errors.
 There is no module-level graph or LLM cache. Callers that want to reuse a
 graph (the API) build one with build_graph() and pass it to run_agent();
 tests inject their own graph or LLM the same way.
+
+Flow: recall_memory -> record_intake -> analyst <-> tools.
+Current-incident evidence comes from the timeline and Chroma (search_timeline).
+Historical operational memory comes from the MemoryRecorder, passed per run in
+config["configurable"]["memory_recorder"]; it is advisory context only.
 """
 
 import os
@@ -13,16 +18,19 @@ import json
 import operator
 import re
 import traceback
+from datetime import datetime
 from typing import TypedDict, Annotated
 
 from dotenv import load_dotenv, find_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-from agent.tools import search_timeline, search_past_incidents
+from agent.tools import search_timeline
 from agent.prompts import SYSTEM_PROMPT, ROOT_CAUSE_PROMPT
+from agent.memory_context import build_incident_profile, build_recall_query, format_memory_context
 
 load_dotenv(find_dotenv())
 
@@ -31,11 +39,16 @@ class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
     incident_id: str
     event_count: int
-    timeline_text: str
-    postmortem: dict
+    incident_profile: dict          # services / patterns / signatures from the timeline
+    current_evidence: str           # the current incident's timeline text
+    recalled_memories: list         # normalized historical memories (dicts), never raw client objects
+    memory_status: dict             # recall outcome: status, backend, query, error
+    memory_retention: Annotated[list, operator.add]
 
 
-tools = [search_timeline, search_past_incidents]
+tools = [search_timeline]
+
+NOT_CONSULTED = {"status": "not_consulted", "backend": "none", "query": "", "memories": [], "error": None}
 
 
 class MissingAPIKeyError(EnvironmentError):
@@ -58,6 +71,51 @@ def should_continue(state: AgentState):
     return "end"
 
 
+def _recorder(config: RunnableConfig):
+    return ((config or {}).get("configurable") or {}).get("memory_recorder")
+
+
+def recall_memory_node(state: AgentState, config: RunnableConfig):
+    """Recall prior operational experience before any root-cause reasoning.
+    The query and incident scope come from application state, not the model."""
+    recorder = _recorder(config)
+    query = build_recall_query(state["incident_profile"])
+    if recorder is None:
+        outcome = {**NOT_CONSULTED, "status": "disabled", "query": query,
+                   "error": "long-term memory is not configured"}
+    else:
+        outcome = recorder.recall_for_incident(state["incident_id"], query).to_dict()
+    return {
+        "recalled_memories": outcome["memories"],
+        "memory_status": {k: v for k, v in outcome.items() if k != "memories"},
+        "messages": [HumanMessage(content=format_memory_context(outcome))],
+    }
+
+
+def record_intake_node(state: AgentState, config: RunnableConfig):
+    """Retain the 'incident received' and 'evidence collected' milestones."""
+    recorder = _recorder(config)
+    if recorder is None:
+        return {"memory_retention": []}
+    p = state["incident_profile"]
+    common = {"services": p["services"], "pattern_tags": p["pattern_tags"]}
+    first_seen = datetime.fromisoformat(p["first_seen"]) if p.get("first_seen") else None
+    last_seen = datetime.fromisoformat(p["last_seen"]) if p.get("last_seen") else None
+    outcomes = [
+        recorder.record_incident(
+            state["incident_id"],
+            f"Incident received with {state['event_count']} timeline events"
+            + (f"; failure patterns {', '.join(p['pattern_tags'])}" if p["pattern_tags"] else "") + ".",
+            occurred_at=first_seen, details={"sources": p.get("sources", "")}, **common),
+        recorder.record_evidence_digest(
+            state["incident_id"],
+            "Key evidence: " + (" | ".join(p.get("key_evidence") or []) or "no ERROR/CRITICAL events"),
+            occurred_at=last_seen,
+            details={"error_signatures": "; ".join(p["error_signatures"])}, **common),
+    ]
+    return {"memory_retention": [o.to_dict() for o in outcomes]}
+
+
 def build_graph(llm=None):
     """
     Compile a new agent graph.
@@ -74,9 +132,13 @@ def build_graph(llm=None):
         return {"messages": [response]}
 
     graph = StateGraph(AgentState)
+    graph.add_node("recall_memory", recall_memory_node)
+    graph.add_node("record_intake", record_intake_node)
     graph.add_node("analyst", analyst_node)
     graph.add_node("tools", ToolNode(tools))
-    graph.set_entry_point("analyst")
+    graph.set_entry_point("recall_memory")
+    graph.add_edge("recall_memory", "record_intake")
+    graph.add_edge("record_intake", "analyst")
     graph.add_conditional_edges("analyst", should_continue, {
         "tools": "tools",
         "end": END,
@@ -114,6 +176,7 @@ def _extract_json_from_text(text: str) -> dict:
 
     # Give up — return the raw text as summary so the UI still gets something useful
     return {
+        "_parse_failed": True,
         "summary": text[:500] if len(text) > 500 else text,
         "root_cause": "Could not parse structured output from agent. See summary for raw response.",
         "contributing_factors": [],
@@ -134,7 +197,13 @@ def format_timeline(timeline: list) -> str:
     )
 
 
-def run_agent(incident_id: str, timeline: list, graph=None) -> dict:
+def _only_recalled_incidents(similar: list, memories: list) -> list:
+    """Keep only 'similar incident' entries that name an incident actually recalled."""
+    recalled_ids = {m["incident_id"] for m in memories if m.get("incident_id")}
+    return [s for s in similar if isinstance(s, str) and any(i in s for i in recalled_ids)]
+
+
+def run_agent(incident_id: str, timeline: list, graph=None, recorder=None) -> dict:
     """
     Run the LangGraph agent and return a structured post-mortem dict.
 
@@ -142,6 +211,10 @@ def run_agent(incident_id: str, timeline: list, graph=None) -> dict:
     built for this call (raises MissingAPIKeyError if OPENAI_API_KEY is missing).
     Any other failure, including OSErrors from tools or Chroma, is returned as
     an "agent_error" result.
+
+    recorder: a memory.MemoryRecorder for long-term operational memory, or None
+    (memory disabled). Memory failures never fail the analysis; the result's
+    "historical_memory" reports whether memory was actually consulted.
 
     The result's "analysis_mode" is set by this function, never by the LLM:
     "llm_agent", "agent_error" or "no_evidence".
@@ -166,6 +239,7 @@ def run_agent(incident_id: str, timeline: list, graph=None) -> dict:
             "similar_past_incidents": [],
             "confidence": "low",
             "timeline_reconstruction": "",
+            "historical_memory": dict(NOT_CONSULTED),
         }
 
     # Build the timeline text (truncated to avoid context window overflow)
@@ -192,16 +266,24 @@ def run_agent(incident_id: str, timeline: list, graph=None) -> dict:
         event_count=len(timeline),
     )
 
+    profile = build_incident_profile(timeline)
+
     try:
         if graph is None:
             graph = build_graph()
-        result = graph.invoke({
-            "messages": [HumanMessage(content=prompt)],
-            "incident_id": incident_id,
-            "event_count": len(timeline),
-            "timeline_text": timeline_text,
-            "postmortem": {},
-        })
+        result = graph.invoke(
+            {
+                "messages": [HumanMessage(content=prompt)],
+                "incident_id": incident_id,
+                "event_count": len(timeline),
+                "incident_profile": profile,
+                "current_evidence": timeline_text,
+                "recalled_memories": [],
+                "memory_status": {},
+                "memory_retention": [],
+            },
+            config={"configurable": {"memory_recorder": recorder}},
+        )
 
         raw_content = result["messages"][-1].content
 
@@ -221,7 +303,25 @@ def run_agent(incident_id: str, timeline: list, graph=None) -> dict:
         postmortem.setdefault("similar_past_incidents", [])
         postmortem.setdefault("confidence", "medium")
         postmortem.setdefault("timeline_reconstruction", "")
+        postmortem.setdefault("memory_influence", "")
 
+        # Historical memory status comes from the recall step, never from the LLM.
+        status = result.get("memory_status") or {}
+        memories = result.get("recalled_memories") or []
+        postmortem["historical_memory"] = ({**status, "memories": memories} if status
+                                           else dict(NOT_CONSULTED))
+        if postmortem["historical_memory"]["status"] != "available":
+            postmortem["similar_past_incidents"] = []
+            postmortem["memory_influence"] = ""
+        else:
+            postmortem["similar_past_incidents"] = _only_recalled_incidents(
+                postmortem["similar_past_incidents"], memories)
+
+        # Only the intake milestones (incident, evidence digest) are retained.
+        # The LLM's diagnosis and recommendations are NOT sent to long-term
+        # memory: they are unverified until a human decision validates them,
+        # and the system must not learn from its own guesses.
+        postmortem["memory_retention"] = list(result.get("memory_retention") or [])
         return postmortem
 
     except MissingAPIKeyError:
@@ -242,5 +342,8 @@ def run_agent(incident_id: str, timeline: list, graph=None) -> dict:
             "similar_past_incidents": [],
             "confidence": "low",
             "timeline_reconstruction": "",
+            # The run failed, so whether memory was consulted is not known.
+            "historical_memory": {**NOT_CONSULTED, "status": "unknown",
+                                  "error": "analysis failed before completing"},
             "_error_traceback": tb,
         }

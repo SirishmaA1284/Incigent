@@ -8,6 +8,7 @@ from pathlib import Path
 
 import streamlit as st
 import requests
+import html
 import json
 import os
 from datetime import datetime
@@ -822,7 +823,7 @@ def render_report(pm, tl, iid):
 """, unsafe_allow_html=True)
 
     st.markdown('<div class="report-card">', unsafe_allow_html=True)
-    tabs = st.tabs(["Factors & Patterns", "Timeline", "Evidence", "Actions", "Similar"])
+    tabs = st.tabs(["Factors & Patterns", "Timeline", "Evidence", "Actions", "Memory"])
 
     with tabs[0]:
         factors = pm.get("contributing_factors", [])
@@ -897,13 +898,31 @@ def render_report(pm, tl, iid):
 
     with tabs[4]:
         similar = pm.get("similar_past_incidents",[])
+        hm = pm.get("historical_memory") or {}
+        hm_status = hm.get("status", "not_consulted")
+        memories = hm.get("memories") or []
         if mode == OFFLINE_MODE:
             st.info(f"Historical incident recall is not available in {OFFLINE_LABEL}.")
-        elif similar:
-            st.markdown('<div class="sec-heading">Past incidents with similar signatures</div>', unsafe_allow_html=True)
-            st.markdown("".join(f'<div class="similar-item">↩  {s}</div>' for s in similar), unsafe_allow_html=True)
+        elif hm_status == "available":
+            st.success(f"Historical memory consulted ({hm.get('backend')}): {len(memories)} relevant item(s). "
+                       "Past experience is context, not evidence about this incident.")
+        elif hm_status == "unavailable":
+            st.warning(f"Historical memory unavailable ({hm.get('error')}). This analysis used current evidence only.")
+        elif hm_status == "disabled":
+            st.info("Historical memory is not configured. This analysis used current evidence only.")
         else:
-            st.info("No similar past incidents were found.")
+            st.info("Historical memory was not consulted for this analysis.")
+        if similar:
+            st.markdown('<div class="sec-heading">Past incidents with similar signatures</div>', unsafe_allow_html=True)
+            st.markdown("".join(f'<div class="similar-item">↩  {html.escape(str(s))}</div>' for s in similar), unsafe_allow_html=True)
+        if pm.get("memory_influence"):
+            st.markdown('<div class="sec-heading">How memory influenced this analysis</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="similar-item">{html.escape(str(pm["memory_influence"]))}</div>', unsafe_allow_html=True)
+        if memories:
+            st.markdown('<div class="sec-heading">Recalled historical memory</div>', unsafe_allow_html=True)
+            st.markdown("".join(
+                f'<div class="similar-item">{html.escape(" · ".join(x for x in (m.get("incident_id"), m.get("event_type")) if x))}'
+                f' — {html.escape(str(m.get("text", "")))}</div>' for m in memories), unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 

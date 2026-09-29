@@ -12,9 +12,20 @@ from langchain_core.messages import AIMessage
 
 import api.main as api_main
 from agent.graph import MissingAPIKeyError, build_graph as real_build_graph
+from memory import MemoryRecorder
+from memory.fake_memory import FakeMemory
 from tests.test_agent import FINAL_JSON, ScriptedLLM
 
 SAMPLE_LOG = (Path(__file__).parent.parent / "data" / "raw" / "sample_logs.txt").read_bytes()
+
+
+@pytest.fixture(autouse=True)
+def fake_memory(monkeypatch):
+    """The API builds its memory recorder from .env at startup; these tests use
+    an in-process FakeMemory instead so they never reach a real Hindsight bank."""
+    memory = FakeMemory()
+    monkeypatch.setattr(api_main, "build_memory_recorder", lambda: MemoryRecorder(memory))
+    return memory
 
 
 @pytest.fixture

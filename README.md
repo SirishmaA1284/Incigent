@@ -61,14 +61,46 @@ Logs + Slack + Tickets
    Evidence index          ChromaDB · text-embedding-3-small · 5-minute window chunks
    (embedder / retriever)  scoped per incident; chunks carry their event IDs
         │
-   LangGraph agent         GPT-4o · tool-calling loop
-   tools:                  search_timeline()  (incident ID injected from graph state)
-                           search_past_incidents()
-        │
+   LangGraph agent         recall_memory → record_intake → analyst ⇄ tools
+                           GPT-4o · search_timeline() (incident ID injected from graph state)
+        │                         ▲ historical memory (advisory)
    FastAPI + Streamlit     REST API · UI with event filters · JSON + Markdown export
+
+   Long-term memory        Hindsight (optional) via memory/ — past incidents, diagnoses,
+                           recommendations, human decisions, actions, outcomes, lessons
 ```
 
-Past-incident memory (`rag/memory_store.py`) is not populated yet, so `search_past_incidents` currently returns no matches.
+Chroma holds only the **current incident's evidence**. Hindsight holds **long-term operational memory** across incidents. Recalled memory is advisory context: it never authorizes an action and is not an approval or audit store.
+
+---
+
+## Long-term memory (Hindsight, optional)
+
+Uses the [Hindsight](https://hindsight.vectorize.io) Python client (`hindsight-client`, verified against 0.10.1) through `memory/hindsight_memory.py`; nothing else in the app talks to Hindsight directly.
+
+```bash
+pip install -r requirements.txt   # includes hindsight-client
+# in .env
+HINDSIGHT_API_URL=http://localhost:8888   # your Hindsight server or cloud endpoint
+HINDSIGHT_API_KEY=                         # sent as a Bearer token, if your server needs one
+HINDSIGHT_BANK_ID=incident-ops             # memory bank used by this app
+```
+
+Memory is enabled only when both `HINDSIGHT_API_URL` and `HINDSIGHT_BANK_ID` are set. The bank is created by Hindsight on the first retain; until then, recall finds no memories.
+
+What happens on each analysis:
+
+1. **Recall, before any reasoning.** A query is built from the timeline (services, failure patterns, error signatures) and sent with Hindsight's `recall`, restricted to this app's memories by tag. Memories recorded for the current incident are excluded.
+2. The model receives **CURRENT INCIDENT EVIDENCE** and **HISTORICAL OPERATIONAL MEMORY** as separate inputs and is told to treat memory as unverified prior experience.
+3. **Retain** only facts about the incident itself, with Hindsight's `retain`: incident received and an evidence digest. Each uses a stable `document_id`, so re-analysing an incident replaces its earlier records instead of duplicating them. Obvious secrets are redacted first.
+
+The LLM's diagnosis and recommendations are **not** retained: they are unverified until a human decides on them, and the system must not learn from its own guesses.
+
+Every report states the memory status: consulted, unavailable (analysis continues on current evidence only), not configured, or not consulted. If Hindsight is down, the analysis still runs. Failed retains are logged and kept in process memory for retry; they are lost if the process restarts.
+
+The recorder can also store validated diagnoses and recommendations, human decisions (approvals and rejections with reasons), actions, verification results and lessons, but the app has no approval step yet, so it records none of these today.
+
+Normal test runs never contact Hindsight, even with real credentials in `.env`: `tests/conftest.py` blocks the real client for every test not marked `hindsight_live`.
 
 ---
 
@@ -94,7 +126,8 @@ Without `--postmortem` it scores a built-in sample post-mortem, not live agent o
 ├── data/raw/        Sample incident data (DB outage scenario)
 ├── evaluation/      Evaluation metrics and baselines
 ├── ingestion/       Log parser (signature library), Slack parser, ticket parser, timeline builder
-├── rag/             Embedder, ChromaDB store, retriever
+├── memory/          Long-term operational memory: recorder, redaction, Hindsight adapter, test fake
+├── rag/             Current-incident evidence: embedder, ChromaDB store, retriever
 ├── tests/           pytest suite
 └── ui/              Streamlit interface — demo mode, filters, JSON/Markdown export
 ```
@@ -107,7 +140,8 @@ Without `--postmortem` it scores a built-in sample post-mortem, not live agent o
 |---|---|
 | Agent orchestration | LangGraph (conditional tool-calling loop) |
 | LLM | GPT-4o (temperature 0, JSON output requested in the prompt) |
-| Vector store | ChromaDB + text-embedding-3-small |
+| Vector store (current incident) | ChromaDB + text-embedding-3-small |
+| Long-term memory (optional) | Hindsight (`hindsight-client`) |
 | API | FastAPI + uvicorn |
 | UI | Streamlit (event filters, JSON + Markdown export) |
 | Evaluation | RAGAS-style custom metrics |
@@ -120,7 +154,11 @@ Without `--postmortem` it scores a built-in sample post-mortem, not live agent o
 python -m pytest -q
 # Live tests call the real OpenAI API and are deselected by default:
 python -m pytest -m live -v
+# Live Hindsight round trip (needs HINDSIGHT_API_URL and a separate HINDSIGHT_TEST_BANK_ID):
+python -m pytest -m hindsight_live -v
 ```
+
+The default suite needs no OpenAI key and no Hindsight server; memory tests use an in-process fake that is never used by the application itself.
 
 ---
 

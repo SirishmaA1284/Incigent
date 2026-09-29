@@ -16,6 +16,7 @@ from ingestion.ticket_parser import parse_tickets
 from ingestion.timeline_builder import build_timeline
 from rag.embedder import embed_timeline
 from agent.graph import MissingAPIKeyError, build_graph, run_agent
+from memory import build_memory_recorder
 
 
 @asynccontextmanager
@@ -27,6 +28,11 @@ async def lifespan(app: FastAPI):
         # Missing API key — log clearly but don't crash the server.
         print(f"[WARN] Could not initialise the agent graph at startup: {e}")
         app.state.graph = None
+    # Long-term operational memory (Hindsight) is optional; without it the
+    # analysis runs and reports that historical memory was not consulted.
+    app.state.memory_recorder = build_memory_recorder()
+    if app.state.memory_recorder.memory is None:
+        print(f"[INFO] Long-term memory disabled: {app.state.memory_recorder.disabled_reason}")
     yield
 
 
@@ -129,6 +135,7 @@ async def analyze_incident(
     timeline = build_timeline(sources)
     embed_timeline(timeline, incident_id)
 
-    result = run_agent(incident_id, timeline, graph=graph)
+    result = run_agent(incident_id, timeline, graph=graph,
+                       recorder=getattr(request.app.state, "memory_recorder", None))
 
     return JSONResponse({"incident_id": incident_id, "postmortem": result})

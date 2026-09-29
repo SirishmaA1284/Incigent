@@ -4,7 +4,6 @@ from langchain.tools import tool
 from langgraph.prebuilt import InjectedState
 
 from rag.retriever import retrieve_evidence
-from rag.memory_store import retrieve_similar_incidents as _retrieve_similar
 
 
 @tool
@@ -21,10 +20,5 @@ def search_timeline(
     return "\n\n---\n".join(r["text"] for r in results)
 
 
-@tool
-def search_past_incidents(query: str) -> str:
-    """Search previously resolved incidents for similar failure patterns."""
-    results = _retrieve_similar(query)
-    if not results:
-        return "No similar past incidents found."
-    return "\n\n---\n".join(results)
+# Past incidents are no longer a model-callable tool: historical operational
+# memory is recalled deterministically by the graph's recall_memory step.

@@ -93,7 +93,9 @@ def offline_postmortem(iid, tl, reason=None):
             "summary": sm, "timeline_reconstruction": nar, "root_cause": rc,
             "contributing_factors": fa, "evidence_citations": ev6, "action_items": ac,
             "similar_past_incidents": [], "confidence": cf, "patterns_detected": pc,
-            "event_count": len(tl), "duration_minutes": dur}
+            "event_count": len(tl), "duration_minutes": dur,
+            "historical_memory": {"status": "not_consulted", "backend": "none", "query": "",
+                                  "memories": [], "error": "offline heuristic mode does not use memory"}}
 
 
 def analyze_with_fallback(call_api, iid, tl):
