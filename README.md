@@ -104,7 +104,7 @@ Normal test runs never contact Hindsight, even with real credentials in `.env`: 
 
 ---
 
-## Human approval (no actions are executed yet)
+## Human approval
 
 After analysis, the top recommendation (first P1, else first) becomes a canonical action payload and a **pending approval** in an application-owned SQLite database (`APPROVAL_DB_PATH`). The graph then pauses with LangGraph's `interrupt()`; its state is checkpointed to SQLite (`CHECKPOINT_DB_PATH`), so it can resume after a restart.
 
@@ -126,7 +126,7 @@ validate approval  →  atomically consume approval  →  execute action
 
 - `validate()` establishes that an approval is valid *right now*. It changes nothing and is not permission to act.
 - `consume()` is the one-time authorization handoff immediately before execution: it re-checks everything and marks the approval `consumed` in one transaction, so it succeeds at most once.
-- An executor must never execute after validation alone. This stage has no executor: the graph stops after validation, and approvals stay `approved`, not consumed.
+- An executor must never execute after validation alone. The only executor is the simulated remediation executor below, which follows exactly this order.
 
 **The direct `POST /approvals` endpoint** is for development and demos only and returns 404 unless `ENABLE_DEV_APPROVAL_ENDPOINT=1`. It is not an authorization path: it creates a *pending* approval (recorded as `requested_by="dev-endpoint"`) that still needs a human decision and still has to pass the same validate/consume checks for the exact incident, kind and payload. It cannot resume an analysis workflow, which only accepts the approval that workflow created. The intended flow is: analysis proposes an action → the application creates the approval → a human decides → the executor validates and consumes → the action runs.
 
@@ -137,6 +137,30 @@ validate approval  →  atomically consume approval  →  execute action
 **Checkpoint data is sensitive.** `CHECKPOINT_DB_PATH` (default `var/checkpoints.sqlite3`) holds full paused-workflow state: incident IDs, log and ticket excerpts, model messages and the proposed action. `APPROVAL_DB_PATH` holds approval payloads and the audit log. `var/` is gitignored — never commit these files or share them casually, and in production put them on protected storage with restricted access. They are not encrypted by this application. Anyone who can write to them can alter workflow or approval state.
 
 `actor` is a self-declared name recorded in the audit log, not authenticated identity: the API has only the shared `INCIDENT_API_TOKEN`. Per-user authentication is future work.
+
+---
+
+## Simulated remediation and verification
+
+After a human approves, the resumed workflow can carry out the approved action — **against an in-memory simulator only** (`remediation/simulator.py`). The simulator is plain Python state with fixed scenarios (`INC-SIM-001` to `INC-SIM-004`). It never uses a shell, subprocesses, the network, containers, clusters, SSH or real databases.
+
+```
+propose_action → request_approval → interrupt → human decision → validate_approval
+  → execute_remediation (validate → consume → apply) → verify_remediation → record_outcome
+```
+
+- **Only three allowlisted actions:** `restart_service`, `rollback_deployment` (`target_version`: `"previous"` or a version), and `scale_service` (`replicas` 1–20). Each has an exact field set. Unknown kinds, missing or extra fields, and anything resembling a command are rejected. The model may propose one under `remediation`. The application validates it first:
+  - **valid** → canonicalized into the approval payload, where the action hash covers it
+  - **invalid** → the proposal is dropped and **no approval is created** (workflow status `proposal_rejected`)
+  - **null or absent** → the usual non-executable approval for the top recommendation
+- **`consume()` is the authorization boundary.** The executor checks the payload and the target service, calls `validate()`, then `consume()`, and touches the simulator only after `consume()` returns. If `consume()` fails, nothing runs. One approval executes at most once: a second attempt fails with `consumed`, and the simulator also refuses a second application for the same approval.
+- **Verification is independent.** The verifier reads the simulator's state, never the executor's report, and checks the specific postcondition (deployed version, replicas, or restart count) plus service health.
+- **Approved ≠ executed ≠ verified.** A restart on `INC-SIM-001` executes but the leaking version keeps the service unhealthy, so the workflow ends `remediation_unverified`, not recovered.
+- **Only validated outcomes become memory.** A human decision, the executed action, a passed verification, and a lesson are retained only after verification passes. Unverified or failed outcomes retain nothing. The executor never reads memory, and it works with Hindsight unavailable or unconfigured.
+
+**Crash consistency (known limitation).** Consuming the approval gives *at-most-once authorization*: one approval can never authorize two executions. But applying the action and saving the graph checkpoint that records the result are **not one atomic transaction**. If the process crashes after the action is applied but before that checkpoint is saved, a later resume finds the approval already consumed, so nothing runs again. The persisted workflow result can then under-report what actually happened, and lag behind the simulator's real state. This is **not** exactly-once distributed execution. It's acceptable for this in-memory demo; persistent execution infrastructure will need a durable execution record, idempotency keyed by approval ID, and reconciliation.
+
+Read-only views: `GET /workflows/{thread_id}` (approval, execution and verification results) and `GET /simulator/{incident_id}` (simulated state). There is no endpoint that executes an action directly; execution only happens inside a resumed workflow after its own approval is consumed.
 
 ---
 

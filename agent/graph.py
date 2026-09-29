@@ -8,7 +8,11 @@ graph (the API) build one with build_graph() and pass it to run_agent();
 tests inject their own graph or LLM the same way.
 
 Flow: recall_memory -> record_intake -> analyst <-> tools
-      -> propose_action -> request_approval -> await_approval (interrupt) -> validate_approval.
+      -> propose_action -> request_approval -> await_approval (interrupt) -> validate_approval
+      -> execute_remediation (validate -> consume -> apply, simulator only)
+      -> verify_remediation -> record_outcome.
+Execution happens only when a RemediationExecutor is passed on resume, and only
+after ApprovalService.consume() succeeds for the exact approved payload.
 Current-incident evidence comes from the timeline and Chroma (search_timeline).
 Historical operational memory comes from the MemoryRecorder, passed per run in
 config["configurable"]["memory_recorder"]; it is advisory context only.
@@ -40,6 +44,9 @@ from agent.approval_flow import (
     await_approval_node, propose_action_node, request_approval_node, route_after_proposal,
     route_after_validation, validate_approval_node,
 )
+from agent.remediation_flow import (
+    execute_remediation_node, record_outcome_node, route_after_execution, verify_remediation_node,
+)
 
 load_dotenv(find_dotenv())
 
@@ -57,6 +64,10 @@ class AgentState(TypedDict):
     approval_request: dict          # approval_id, kind, action_hash, expires_at (from the approval DB)
     approval_resume: Any            # raw resume value; only ever used as a reference, never trusted
     approval_result: dict           # outcome of application-side validation
+    remediation: dict               # ExecutionResult: consume-gated simulator execution
+    verification: dict              # VerificationResult: independent check of the postcondition
+    outcome_memory: dict            # what (if anything) was retained as validated memory
+    proposal_rejection: dict        # set when the model's remediation was invalid (no approval created)
 
 
 tools = [search_timeline]
@@ -167,8 +178,16 @@ def build_graph(llm=None, checkpointer=None):
                                 {"request_approval": "request_approval", "end": END})
     graph.add_edge("request_approval", "await_approval")
     graph.add_edge("await_approval", "validate_approval")
+    graph.add_node("execute_remediation", execute_remediation_node)
+    graph.add_node("verify_remediation", verify_remediation_node)
+    graph.add_node("record_outcome", record_outcome_node)
     graph.add_conditional_edges("validate_approval", route_after_validation,
-                                {"await_approval": "await_approval", "end": END})
+                                {"await_approval": "await_approval",
+                                 "execute_remediation": "execute_remediation", "end": END})
+    graph.add_conditional_edges("execute_remediation", route_after_execution,
+                                {"verify_remediation": "verify_remediation", "record_outcome": "record_outcome"})
+    graph.add_edge("verify_remediation", "record_outcome")
+    graph.add_edge("record_outcome", END)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -229,9 +248,19 @@ def _only_recalled_incidents(similar: list, memories: list) -> list:
 
 
 def _workflow(result: dict, thread_id) -> dict:
-    """Where the approval workflow stands after an invoke. Nothing is ever executed."""
+    """Where the workflow stands after an invoke. Approved != executed != verified."""
+    remediation = result.get("remediation") or {}
     if result.get("__interrupt__"):
         status = "awaiting_approval"
+    elif result.get("proposal_rejection"):
+        status = "proposal_rejected"                               # invalid action: no approval created
+    elif remediation:
+        if remediation.get("status") != "executed":
+            status = f"remediation_{remediation.get('status')}"   # not_executable / not_authorized / execution_failed
+        elif (result.get("verification") or {}).get("verified"):
+            status = "remediation_verified"
+        else:
+            status = "remediation_unverified"                      # executed, but recovery NOT verified
     else:
         status = {"validated": "approval_validated", "denied": "approval_denied"}.get(
             (result.get("approval_result") or {}).get("status"), "completed")
@@ -376,6 +405,7 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
         # Approval state comes from the application approval store via the graph.
         postmortem["workflow"] = _workflow(result, thread_id)
         postmortem["approval"] = dict(result.get("approval_request") or {}) or None
+        postmortem["proposal_rejection"] = result.get("proposal_rejection")
         return postmortem
 
     except MissingAPIKeyError:
@@ -407,14 +437,20 @@ class WorkflowNotAwaitingApproval(Exception):
     """The thread does not exist or is not paused at an approval checkpoint."""
 
 
-def resume_agent(thread_id: str, approval_id: str, *, graph, approvals) -> dict:
+def resume_agent(thread_id: str, approval_id: str, *, graph, approvals,
+                 executor=None, verifier=None, recorder=None) -> dict:
     """
     Resume a paused workflow after a human decision. The resume value is only a
     reference ({"approval_id": ...}); the graph re-checks the approval in the
     application database. This function never accepts or forwards a decision.
+
+    With an executor, a validated approval proceeds to execute_remediation, where
+    the action runs only after consume() succeeds; the verifier then checks the
+    outcome independently. recorder receives validated outcomes only.
     """
     config = {"configurable": {"thread_id": thread_id, "approval_service": approvals,
-                               "memory_recorder": None}}
+                               "memory_recorder": recorder, "remediation_executor": executor,
+                               "remediation_verifier": verifier}}
     snapshot = graph.get_state(config)
     if not snapshot or "await_approval" not in (snapshot.next or ()):
         raise WorkflowNotAwaitingApproval(f"thread {thread_id!r} is not awaiting approval")
@@ -427,4 +463,30 @@ def resume_agent(thread_id: str, approval_id: str, *, graph, approvals) -> dict:
         "workflow": _workflow(result, thread_id),
         "approval_result": result.get("approval_result") or {},
         "approval": record.to_dict() if record else None,
+        "remediation": result.get("remediation"),
+        "verification": result.get("verification"),
+        "outcome_memory": result.get("outcome_memory"),
+    }
+
+
+def workflow_state(thread_id: str, *, graph) -> Optional[dict]:
+    """Read-only view of a workflow's persisted state (approval, execution, verification)."""
+    snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
+    values = snapshot.values if snapshot else None
+    if not values:
+        return None
+    result = dict(values)
+    if snapshot.next and "await_approval" in snapshot.next:
+        result["__interrupt__"] = True
+    return {
+        "thread_id": thread_id,
+        "incident_id": values.get("incident_id"),
+        "workflow": _workflow(result, thread_id),
+        "proposed_action": values.get("proposed_action"),
+        "approval_request": values.get("approval_request"),
+        "approval_result": values.get("approval_result"),
+        "remediation": values.get("remediation"),
+        "verification": values.get("verification"),
+        "outcome_memory": values.get("outcome_memory"),
+        "proposal_rejection": values.get("proposal_rejection"),
     }

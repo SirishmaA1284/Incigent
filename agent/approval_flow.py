@@ -30,6 +30,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from approvals import ApprovalDenied
+from remediation.actions import InvalidAction, parse_action
 
 OPERATIONAL = "operational"
 
@@ -42,27 +43,54 @@ def approval_service(config: RunnableConfig):
     return configurable.get("approval_service")
 
 
+def invalid_remediation_reason(analysis: dict):
+    """Why the model's remediation proposal is invalid, or None if it is valid or
+    absent. A null/missing remediation is "no proposal", not an invalid one."""
+    proposal = analysis.get("remediation")
+    if proposal is None:
+        return None
+    try:
+        parse_action(proposal)
+    except InvalidAction as e:
+        return str(e)
+    return None
+
+
 def select_proposed_action(incident_id: str, analysis: dict):
     """Canonical payload for the analysis' top recommendation (first P1, else first),
-    or None when there is nothing actionable. Built by the application, not the LLM."""
-    if analysis.get("_parse_failed"):
+    or None when there is nothing actionable. Built by the application, not the LLM.
+
+    - valid allowlisted remediation -> canonicalized under "remediation", covered
+      by the approval's action hash;
+    - null/absent remediation       -> descriptive (non-executable) proposal, as in Stage 3;
+    - INVALID remediation           -> None: the whole proposal is dropped and no
+      approval is ever created for it."""
+    if analysis.get("_parse_failed") or invalid_remediation_reason(analysis):
         return None
     items = [i for i in (analysis.get("action_items") or []) if isinstance(i, dict) and str(i.get("what", "")).strip()]
-    if not items:
+    remediation = parse_action(analysis["remediation"]).to_payload() if analysis.get("remediation") is not None else None
+    if not items and remediation is None:
         return None
-    chosen_index = next((n for n, i in enumerate(items) if str(i.get("priority", "")).upper() == "P1"), 0)
-    item = items[chosen_index]
-    return {
+    if items:
+        chosen_index = next((n for n, i in enumerate(items) if str(i.get("priority", "")).upper() == "P1"), 0)
+        item = items[chosen_index]
+        action = {"description": str(item.get("what", "")).strip(),
+                  "owner": str(item.get("owner", "")).strip(),
+                  "priority": str(item.get("priority", "")).strip()}
+        source = f"rec-{chosen_index + 1}"
+    else:
+        action = {"description": f"{remediation['kind']} {remediation['service']}", "owner": "", "priority": ""}
+        source = "remediation"
+    payload = {
         "kind": OPERATIONAL,
         "incident_id": incident_id,
-        "action": {
-            "description": str(item.get("what", "")).strip(),
-            "owner": str(item.get("owner", "")).strip(),
-            "priority": str(item.get("priority", "")).strip(),
-        },
+        "action": action,
         "proposed_by": "llm_agent",
-        "source_recommendation": f"rec-{chosen_index + 1}",
+        "source_recommendation": source,
     }
+    if remediation is not None:
+        payload["remediation"] = remediation
+    return payload
 
 
 def propose_action_node(state, config: RunnableConfig):
@@ -70,6 +98,10 @@ def propose_action_node(state, config: RunnableConfig):
         return {"proposed_action": None}
     from agent.graph import _extract_json_from_text  # local import: graph imports this module
     analysis = _extract_json_from_text(state["messages"][-1].content)
+    reason = None if analysis.get("_parse_failed") else invalid_remediation_reason(analysis)
+    if reason:
+        # An invalid action never enters the approval workflow.
+        return {"proposed_action": None, "proposal_rejection": {"reason": f"invalid remediation: {reason}"}}
     return {"proposed_action": select_proposed_action(state["incident_id"], analysis)}
 
 
@@ -127,14 +159,22 @@ def validate_approval_node(state, config: RunnableConfig):
         if denied.code == "pending":
             return {"approval_result": {"status": "awaiting", "error": "approval_still_pending"}}
         return {"approval_result": {"status": "denied", "code": denied.code, "executed": False}}
-    # Deliberately NOT consumed here: consumption is the executor's one-time
-    # handoff right before it acts, and no executor exists yet.
+    # Deliberately NOT consumed here. Validation is not permission to act:
+    # consumption happens inside the executor, immediately before it acts.
+    executable = ("remediation" in action
+                  and ((config or {}).get("configurable") or {}).get("remediation_executor") is not None)
     return {"approval_result": {
         "status": "validated", "approval_id": approval.approval_id, "decided_by": approval.decided_by,
-        "action_hash": approval.action_hash, "executed": False,
-        "note": "approved and validated; no executor exists yet, nothing was run",
+        "action_hash": approval.action_hash, "executed": False, "execution_ready": executable,
+        "note": ("approved and validated; execution happens only after consume()" if executable
+                 else "approved and validated; nothing executable was configured, nothing was run"),
     }}
 
 
 def route_after_validation(state):
-    return "await_approval" if (state.get("approval_result") or {}).get("status") == "awaiting" else "end"
+    result = state.get("approval_result") or {}
+    if result.get("status") == "awaiting":
+        return "await_approval"
+    if result.get("status") == "validated" and result.get("execution_ready"):
+        return "execute_remediation"
+    return "end"

@@ -35,5 +35,11 @@ with exactly these keys:
 - "similar_past_incidents": list of strings, each naming a past incident ID that
   appears in HISTORICAL OPERATIONAL MEMORY; use an empty list if there are none
 - "memory_influence": how historical memory influenced the recommendations, or ""
+- "remediation": null, or ONE proposed remediation using exactly one of these forms:
+    {{"kind": "restart_service", "service": "<service>"}}
+    {{"kind": "rollback_deployment", "service": "<service>", "target_version": "previous"}}
+    {{"kind": "scale_service", "service": "<service>", "replicas": <integer 1-20>}}
+  This is only a proposal: a human must approve it before anything can run,
+  and any other form is ignored.
 - "confidence": "high", "medium" or "low"
 """

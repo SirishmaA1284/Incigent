@@ -20,9 +20,10 @@ from ingestion.ticket_parser import parse_tickets
 from ingestion.timeline_builder import build_timeline
 from rag.embedder import embed_timeline
 from agent.graph import (MissingAPIKeyError, WorkflowNotAwaitingApproval, build_graph,
-                         resume_agent, run_agent)
+                         resume_agent, run_agent, workflow_state)
 from approvals import ApprovalDenied, build_approval_service
 from memory import build_memory_recorder
+from remediation import RemediationExecutor, RemediationVerifier, SimulatedEnvironment, SimulationError
 
 DEFAULT_CHECKPOINT_DB = os.path.join("var", "checkpoints.sqlite3")
 
@@ -39,6 +40,11 @@ async def lifespan(app: FastAPI):
     # Approvals and paused workflows live in application-owned SQLite files.
     app.state.approvals = build_approval_service()
     app.state.checkpointer = build_checkpointer()
+    # Remediation runs ONLY against an in-memory simulator (never real
+    # infrastructure), and only after an approval is consumed.
+    app.state.simulator = SimulatedEnvironment()
+    app.state.executor = RemediationExecutor(app.state.approvals, app.state.simulator)
+    app.state.verifier = RemediationVerifier(app.state.simulator)
     # Build the agent graph once at startup and share it across requests.
     try:
         app.state.graph = build_graph(checkpointer=app.state.checkpointer)
@@ -255,6 +261,31 @@ def resume_workflow(request: Request, thread_id: str, approval_id: str = Form(..
     if graph is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="AI agent unavailable")
     try:
-        return resume_agent(thread_id, approval_id, graph=graph, approvals=request.app.state.approvals)
+        return resume_agent(thread_id, approval_id, graph=graph, approvals=request.app.state.approvals,
+                            executor=request.app.state.executor, verifier=request.app.state.verifier,
+                            recorder=getattr(request.app.state, "memory_recorder", None))
     except WorkflowNotAwaitingApproval as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+# ── Remediation (simulated) — read-only views ─────────────────────────────────
+# There is deliberately no endpoint that executes an action. Execution happens
+# only inside a resumed workflow, after its own approval is consumed.
+
+@app.get("/workflows/{thread_id}")
+def get_workflow(request: Request, thread_id: str, _auth=Depends(_require_auth)):
+    """Persisted workflow state: approval, execution result and verification result."""
+    graph = getattr(request.app.state, "graph", None)
+    state = workflow_state(thread_id, graph=graph) if graph is not None else None
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
+    return state
+
+
+@app.get("/simulator/{incident_id}")
+def get_simulator_state(request: Request, incident_id: str, _auth=Depends(_require_auth)):
+    """Current simulated environment for a scenario incident (e.g. INC-SIM-001)."""
+    try:
+        return request.app.state.simulator.snapshot(incident_id)
+    except SimulationError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
