@@ -1,13 +1,18 @@
+# Environment / secrets
 .env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
 *.py[cod]
 .venv/
+venv/
+.pytest_cache/
+
+# Local data stores
 chroma_db/
+
+# Logs / OS
+*.log
 .DS_Store
-*.log.env
-__pycache__/
-*.py[cod]
-.venv/
-chroma_db/
-.DS_Store
-*.log"venv/" 

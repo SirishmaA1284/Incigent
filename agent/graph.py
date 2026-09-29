@@ -1,7 +1,11 @@
 """
-InfraLens Agent — agent/graph.py
+agent/graph.py
 LangGraph agent that produces structured post-mortem JSON.
 Edge cases: missing API key, empty timeline, tool failures, JSON parse errors.
+
+There is no module-level graph or LLM cache. Callers that want to reuse a
+graph (the API) build one with build_graph() and pass it to run_agent();
+tests inject their own graph or LLM the same way.
 """
 
 import os
@@ -26,41 +30,25 @@ load_dotenv(find_dotenv())
 class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
     incident_id: str
+    event_count: int
     timeline_text: str
     postmortem: dict
 
 
 tools = [search_timeline, search_past_incidents]
-tool_node = ToolNode(tools)
+
+
+class MissingAPIKeyError(EnvironmentError):
+    """OPENAI_API_KEY is not configured. Other OSErrors are not this."""
 
 
 def get_llm():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise EnvironmentError(
+        raise MissingAPIKeyError(
             "OPENAI_API_KEY not set. Add it to your .env file or set it as an environment variable."
         )
     return ChatOpenAI(model="gpt-4o", temperature=0, api_key=api_key).bind_tools(tools)
-
-
-# Fix #4: build LLM and graph once at module load, not on every request.
-# Falls back to None if API key is missing at import time (e.g. during tests);
-# run_agent will raise a clear EnvironmentError in that case.
-try:
-    _llm = get_llm()
-    _graph = None  # built lazily on first run_agent call so imports don't fail
-except EnvironmentError:
-    _llm = None
-    _graph = None
-
-
-def analyst_node(state: AgentState):
-    # Use the module-level singleton; avoids re-instantiating the LLM client
-    # and re-binding tools on every node invocation.
-    llm = _llm if _llm is not None else get_llm()
-    messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-    response = llm.invoke(messages)
-    return {"messages": [response]}
 
 
 def should_continue(state: AgentState):
@@ -70,10 +58,24 @@ def should_continue(state: AgentState):
     return "end"
 
 
-def build_graph():
+def build_graph(llm=None):
+    """
+    Compile a new agent graph.
+
+    llm: a tool-bound chat model (anything with .invoke(messages)). Defaults to
+    get_llm(), which raises MissingAPIKeyError when OPENAI_API_KEY is missing.
+    """
+    if llm is None:
+        llm = get_llm()
+
+    def analyst_node(state: AgentState):
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+        response = llm.invoke(messages)
+        return {"messages": [response]}
+
     graph = StateGraph(AgentState)
     graph.add_node("analyst", analyst_node)
-    graph.add_node("tools", tool_node)
+    graph.add_node("tools", ToolNode(tools))
     graph.set_entry_point("analyst")
     graph.add_conditional_edges("analyst", should_continue, {
         "tools": "tools",
@@ -81,14 +83,6 @@ def build_graph():
     })
     graph.add_edge("tools", "analyst")
     return graph.compile()
-
-
-def _get_graph():
-    """Return the module-level compiled graph, building it once if needed."""
-    global _graph
-    if _graph is None:
-        _graph = build_graph()
-    return _graph
 
 
 def _extract_json_from_text(text: str) -> dict:
@@ -131,9 +125,26 @@ def _extract_json_from_text(text: str) -> dict:
     }
 
 
-def run_agent(incident_id: str, timeline: list) -> dict:
+def format_timeline(timeline: list) -> str:
+    """One line per event, prefixed with its event ID so evidence can be cited."""
+    return "\n".join(
+        f"[E{e.get('event_id', '?')}] [{e['timestamp_str']}] [{e['source'].upper()}] "
+        f"[{e.get('level', 'INFO')}] {e['content']}"
+        for e in timeline
+    )
+
+
+def run_agent(incident_id: str, timeline: list, graph=None) -> dict:
     """
     Run the LangGraph agent and return a structured post-mortem dict.
+
+    graph: a compiled graph from build_graph(). When None, a new graph is
+    built for this call (raises MissingAPIKeyError if OPENAI_API_KEY is missing).
+    Any other failure, including OSErrors from tools or Chroma, is returned as
+    an "agent_error" result.
+
+    The result's "analysis_mode" is set by this function, never by the LLM:
+    "llm_agent", "agent_error" or "no_evidence".
 
     Edge cases handled:
     - Empty timeline
@@ -144,6 +155,7 @@ def run_agent(incident_id: str, timeline: list) -> dict:
     if not timeline:
         return {
             "incident_id": incident_id,
+            "analysis_mode": "no_evidence",
             "summary": "No timeline events provided.",
             "root_cause": "Cannot determine — empty timeline.",
             "contributing_factors": [],
@@ -157,17 +169,12 @@ def run_agent(incident_id: str, timeline: list) -> dict:
         }
 
     # Build the timeline text (truncated to avoid context window overflow)
-    timeline_text = "\n".join(
-        f"[{e['timestamp_str']}] [{e['source'].upper()}] [{e.get('level','INFO')}] {e['content']}"
-        for e in timeline
-    )
+    timeline_text = format_timeline(timeline)
     MAX_CHARS = 6000  # ~1500 tokens — safe for gpt-4o with tools
     if len(timeline_text) <= MAX_CHARS:
         truncated = timeline_text
     else:
-        # Fix #5: count how many complete lines fit, then report the remainder.
-        # The old code counted newlines in the sliced string — that gives the
-        # number of *included* lines, not the remaining ones that were dropped.
+        # Count how many complete lines fit, then report the remainder.
         lines = timeline_text.splitlines()
         chars, included = 0, 0
         for line in lines:
@@ -186,10 +193,12 @@ def run_agent(incident_id: str, timeline: list) -> dict:
     )
 
     try:
-        graph = _get_graph()  # Fix #4: reuse singleton
+        if graph is None:
+            graph = build_graph()
         result = graph.invoke({
             "messages": [HumanMessage(content=prompt)],
             "incident_id": incident_id,
+            "event_count": len(timeline),
             "timeline_text": timeline_text,
             "postmortem": {},
         })
@@ -199,8 +208,11 @@ def run_agent(incident_id: str, timeline: list) -> dict:
         # Parse the structured JSON from the agent's response
         postmortem = _extract_json_from_text(raw_content)
 
+        # The incident ID and analysis mode come from the caller, not the LLM.
+        postmortem["incident_id"] = incident_id
+        postmortem["analysis_mode"] = "llm_agent"
+
         # Ensure required keys exist
-        postmortem.setdefault("incident_id", incident_id)
         postmortem.setdefault("summary", "")
         postmortem.setdefault("root_cause", "")
         postmortem.setdefault("contributing_factors", [])
@@ -212,13 +224,14 @@ def run_agent(incident_id: str, timeline: list) -> dict:
 
         return postmortem
 
-    except EnvironmentError as e:
+    except MissingAPIKeyError:
         # Missing API key — surface clearly
         raise
     except Exception as e:
         tb = traceback.format_exc()
         return {
             "incident_id": incident_id,
+            "analysis_mode": "agent_error",
             "summary": f"Agent error: {str(e)}",
             "root_cause": "Agent failed — see summary for error details.",
             "contributing_factors": [f"Exception: {type(e).__name__}"],

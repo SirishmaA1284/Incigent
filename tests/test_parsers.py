@@ -1,5 +1,5 @@
 """
-tests/test_parsers.py — Unit tests for InfraLens ingestion layer.
+tests/test_parsers.py — Unit tests for the ingestion layer.
 
 Run:  pytest tests/test_parsers.py -v
 """
@@ -86,6 +86,29 @@ class TestParseLogLine:
         assert ev is not None
         assert "RECOVERY" in ev["patterns"] or "CIRCUIT_BREAKER_CLOSE" in ev["patterns"]
 
+    def test_leading_component_bracket_is_preserved(self):
+        # Regression: content used to become "db-primary] Connection pool ..."
+        line = "2024-03-15 02:08:33 ERROR [db-primary] Connection pool exhausted: 200/200 connections active"
+        ev = parse_log_line(line)
+        assert ev["content"] == "[db-primary] Connection pool exhausted: 200/200 connections active"
+
+    def test_bracketed_timestamp_and_level_leave_no_empty_brackets(self):
+        ev = parse_log_line("[2024-03-15 02:08:33] [ERROR] [db] boom")
+        assert ev["content"] == "[db] boom"
+        assert ev["level"] == "ERROR"
+
+    def test_leading_separators_are_stripped(self):
+        ev = parse_log_line("2024-03-15 02:08:33 | ERROR | api: something failed")
+        assert ev["content"] == "api: something failed"
+
+    def test_sample_log_has_no_dangling_component_brackets(self):
+        from pathlib import Path
+        from ingestion.log_parser import parse_log_file
+        path = Path(__file__).parent.parent / "data" / "raw" / "sample_logs.txt"
+        for ev in parse_log_file(str(path)):
+            if ev["component"]:
+                assert ev["content"].startswith(f"[{ev['component']}]"), ev["content"]
+
     def test_replication_lag_pattern_detected(self):
         line = "2024-03-15 02:09:01 WARN [db-replica-1] Replication lag: 47 seconds behind primary"
         ev = parse_log_line(line)
@@ -112,6 +135,43 @@ class TestDetectPatterns:
     def test_deploy_pattern(self):
         hits = detect_patterns("Deploying order-service v2.4.1 to production")
         assert any(t == "DEPLOY" for t, _ in hits)
+
+
+class TestDeployRollbackClassification:
+    @staticmethod
+    def tags(text):
+        return {t for t, _ in detect_patterns(text)}
+
+    def test_transaction_rollback_is_not_a_deployment_rollback(self):
+        tags = self.tags("Transaction rollback: DB unavailable — order ORD-928372 NOT charged")
+        assert "ROLLBACK" not in tags
+        assert "TXN_ROLLBACK" in tags
+
+    @pytest.mark.parametrize("text", [
+        "DB transaction was rolled back",
+        "rollback of txn 12 due to deadlock",
+    ])
+    def test_other_transaction_rollback_phrasings(self, text):
+        tags = self.tags(text)
+        assert "ROLLBACK" not in tags
+        assert "TXN_ROLLBACK" in tags
+
+    @pytest.mark.parametrize("text", [
+        "Rolled back order-service to v2.4.0",
+        "Rollback initiated for release 42",
+        "Rolling back deployment of api-gateway",
+    ])
+    def test_deployment_rollback_still_detected(self, text):
+        assert "ROLLBACK" in self.tags(text)
+
+    def test_rolling_restart_is_not_a_deployment(self):
+        tags = self.tags("Rolling restart initiated for order-service to apply connection pool fix")
+        assert "DEPLOY" not in tags
+        assert "ROLLING_RESTART" in tags
+
+    def test_transaction_rollback_does_not_raise_level(self):
+        ev = parse_log_line("2024-03-15 02:08:37 INFO [payment-service] Transaction rollback: DB unavailable")
+        assert ev["level"] == "INFO"
 
 
 # ── slack_parser ──────────────────────────────────────────────────────────────
@@ -174,6 +234,27 @@ class TestParseTickets:
     def test_content_includes_ticket_id(self):
         events = parse_tickets(self.SAMPLE)
         assert "INC-4821" in events[0]["content"]
+
+    def test_content_format_is_deterministic(self):
+        events = parse_tickets(self.SAMPLE)
+        assert events[0]["content"] == (
+            "[TICKET INC-4821] P1: Production DB down — DB connection pool exhausted. (status: resolved)"
+        )
+        assert events[0]["ticket_id"] == "INC-4821"
+
+    def test_ticket_without_id_keeps_plain_label(self):
+        ticket = dict(self.SAMPLE[0]); del ticket["id"]
+        events = parse_tickets([ticket])
+        assert events[0]["content"].startswith("[TICKET] ")
+        assert events[0]["ticket_id"] is None
+
+    def test_skips_ticket_with_null_created_at(self):
+        ticket = dict(self.SAMPLE[0], created_at=None)
+        assert parse_tickets([ticket]) == []
+
+    def test_ticket_id_survives_into_timeline(self):
+        timeline = build_timeline([parse_tickets(self.SAMPLE)])
+        assert "INC-4821" in timeline[0]["content"]
 
     def test_timestamp_parsed_correctly(self):
         events = parse_tickets(self.SAMPLE)

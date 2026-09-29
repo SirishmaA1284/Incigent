@@ -19,10 +19,14 @@ def get_or_create_collection(name="incidents"):
     )
     return client.get_or_create_collection(name=name, embedding_function=ef)
 
-def embed_timeline(timeline, incident_id):
-    collection = get_or_create_collection()
+def chunk_timeline(timeline, incident_id):
+    """
+    Group events into 5-minute windows. Returns (document, metadata) pairs.
+    Each line carries its [E<id>] prefix and the metadata lists the chunk's
+    event IDs, so retrieved evidence can be traced back to timeline events.
+    """
     if not timeline:
-        return
+        return []
     chunks = []
     current_chunk = []
     chunk_start = timeline[0]["timestamp"]
@@ -35,14 +39,31 @@ def embed_timeline(timeline, incident_id):
             chunk_start = event["timestamp"]
     if current_chunk:
         chunks.append(current_chunk)
+
+    out = []
     for i, chunk in enumerate(chunks):
         text = "\n".join(
-            f"[{e['timestamp_str']}] [{e['source'].upper()}] {e['content']}"
+            f"[E{e.get('event_id', '?')}] [{e['timestamp_str']}] [{e['source'].upper()}] {e['content']}"
             for e in chunk
         )
+        # Chroma metadata values must be scalars, so event IDs are stored as a
+        # comma-separated string.
+        event_ids = ",".join(str(e.get("event_id")) for e in chunk if e.get("event_id") is not None)
+        out.append((text, {"incident_id": incident_id, "chunk_index": i, "event_ids": event_ids}))
+    return out
+
+def embed_timeline(timeline, incident_id):
+    collection = get_or_create_collection()
+    if not timeline:
+        return
+    chunks = chunk_timeline(timeline, incident_id)
+    # Drop chunks from a previous analysis of the same incident so re-running
+    # it never mixes stale evidence with new evidence.
+    collection.delete(where={"incident_id": incident_id})
+    for i, (text, metadata) in enumerate(chunks):
         collection.add(
             documents=[text],
             ids=[f"{incident_id}_chunk_{i}"],
-            metadatas=[{"incident_id": incident_id, "chunk_index": i}]
+            metadatas=[metadata]
         )
     print(f"Embedded {len(chunks)} chunks for incident '{incident_id}'")

@@ -1,5 +1,5 @@
 """
-InfraLens Timeline Builder — ingestion/timeline_builder.py
+Timeline Builder — ingestion/timeline_builder.py
 Merges events from multiple sources, deduplicates, sorts, and enriches with gap detection.
 """
 

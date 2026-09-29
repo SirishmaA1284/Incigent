@@ -47,9 +47,15 @@ PATTERNS = [
     # Memory / OOM
     (re.compile(r'out\s+of\s+memory|oom.kill',                       re.I),           "OOM_KILL",              "CRITICAL"),
     (re.compile(r'memory\s+pressure|swap\s+usage',                   re.I),           "MEMORY_PRESSURE",       "WARN"),
-    # Deployment
-    (re.compile(r'deploy(?:ed|ing|ment)|rolling\s+restart',          re.I),           "DEPLOY",                "INFO"),
-    (re.compile(r'rollback',                                          re.I),           "ROLLBACK",              "WARN"),
+    # Deployment. A rolling restart is a restart, not a new release, so it has
+    # its own tag. Deployment ROLLBACK is suppressed when the line is a DB
+    # transaction rollback (see _SUPPRESSED_BY in detect_patterns).
+    (re.compile(r'deploy(?:ed|ing|ment)',                            re.I),           "DEPLOY",                "INFO"),
+    (re.compile(r'rolling\s+restart',                                re.I),           "ROLLING_RESTART",       "INFO"),
+    (re.compile(r'\b(?:rollback|roll(?:ed|ing)\s+back)\b',           re.I),           "ROLLBACK",              "WARN"),
+    (re.compile(r'\b(?:transaction|txn)s?\b(?:\s+\w+){0,3}?\s+(?:rollback|roll(?:ed|ing)\s+back)\b'
+                r'|\b(?:rollback|roll(?:ed|ing)\s+back)\s+(?:of\s+)?(?:the\s+)?(?:transaction|txn)s?\b', re.I),
+                                                                                      "TXN_ROLLBACK",          "INFO"),
     # Recovery
     (re.compile(r'(?:service|db|connection)\s+re.established|recovered|resolved', re.I), "RECOVERY",          "INFO"),
     (re.compile(r'traffic\s+restored|normalising|all\s+.*healthy',   re.I),           "RECOVERY",              "INFO"),
@@ -58,13 +64,18 @@ PATTERNS = [
 ]
 
 
+# tag -> tag that, when also present, means the first tag is a false positive
+_SUPPRESSED_BY = {"ROLLBACK": "TXN_ROLLBACK"}
+
+
 def detect_patterns(content: str) -> list:
     """Return list of (tag, inferred_level) for known failure patterns."""
     hits = []
     for regex, tag, lvl in PATTERNS:
         if regex.search(content):
             hits.append((tag, lvl))
-    return hits
+    tags = {t for t, _ in hits}
+    return [(t, l) for t, l in hits if _SUPPRESSED_BY.get(t) not in tags]
 
 
 def parse_log_line(line: str) -> Optional[dict]:
@@ -102,7 +113,11 @@ def parse_log_line(line: str) -> Optional[dict]:
     for pat in TS_PATTERNS:
         content = pat.sub("", content, count=1)
     content = LEVEL_PATTERN.sub("", content, count=1)
-    content = re.sub(r'^\s*[\[\]|:]+\s*', '', content).strip()
+    # Removing the timestamp and level can leave empty brackets ("[] ") or
+    # separators ("| ", ": ") at the start. Strip only those. The previous
+    # character-class strip also ate the "[" of a leading "[component]" token,
+    # which produced artifacts like "db-primary] Connection pool exhausted".
+    content = re.sub(r'^(?:\s*(?:\[\s*\]|[|:]+))*', '', content).strip()
     if not content:
         content = line  # fallback
 

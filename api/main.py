@@ -1,4 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, status
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request, UploadFile, File, Form, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import json
@@ -13,33 +15,31 @@ from ingestion.slack_parser import parse_slack_export
 from ingestion.ticket_parser import parse_tickets
 from ingestion.timeline_builder import build_timeline
 from rag.embedder import embed_timeline
-from agent.graph import build_graph, get_llm
+from agent.graph import MissingAPIKeyError, build_graph, run_agent
 
-app = FastAPI(title="InfraLens API")
 
-# ── Singletons (Fix #4) ───────────────────────────────────────────────────────
-# Build once at startup rather than on every request.
-_graph = None
-_llm = None
-
-@app.on_event("startup")
-def _init_singletons():
-    global _graph, _llm
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Build the agent graph once at startup and share it across requests.
     try:
-        _llm = get_llm()
-        _graph = build_graph()
-    except EnvironmentError as e:
+        app.state.graph = build_graph()
+    except MissingAPIKeyError as e:
         # Missing API key — log clearly but don't crash the server.
-        print(f"[WARN] Could not initialise LLM at startup: {e}")
+        print(f"[WARN] Could not initialise the agent graph at startup: {e}")
+        app.state.graph = None
+    yield
 
-# ── Auth (Fix #3) ─────────────────────────────────────────────────────────────
+
+app = FastAPI(title="Incident Analysis API", lifespan=lifespan)
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 _bearer = HTTPBearer(auto_error=False)
-_API_TOKEN = os.getenv("INFRALENS_API_TOKEN", "")
+_API_TOKEN = os.getenv("INCIDENT_API_TOKEN", "")
 
 def _require_auth(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
     """
     Simple static bearer-token check.
-    Set INFRALENS_API_TOKEN in .env.  If the env var is empty (dev mode) auth
+    Set INCIDENT_API_TOKEN in .env.  If the env var is empty (dev mode) auth
     is skipped so local runs still work without any configuration.
     """
     if not _API_TOKEN:
@@ -52,7 +52,7 @@ def _require_auth(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-# ── Upload validation helpers (Fix #8) ───────────────────────────────────────
+# ── Upload validation helpers ─────────────────────────────────────────────────
 _MAX_BYTES = 10 * 1024 * 1024  # 10 MB per file
 _ALLOWED_LOG_MIME = {"text/plain", "application/octet-stream"}
 _ALLOWED_JSON_MIME = {"application/json", "text/plain", "application/octet-stream"}
@@ -77,17 +77,32 @@ async def _read_validated(upload: UploadFile, allowed_mime: set, label: str) -> 
 
 @app.get("/")
 def root():
-    return {"status": "InfraLens is running"}
+    return {"status": "running"}
 
 
 @app.post("/analyze")
 async def analyze_incident(
+    request: Request,
     incident_id: str = Form(...),
     log_file: UploadFile = File(None),
     slack_file: UploadFile = File(None),
     ticket_file: UploadFile = File(None),
     _auth=Depends(_require_auth),
 ):
+    # Resolve the agent graph first so a missing API key fails fast with a
+    # clear 503 instead of partway through ingestion. If startup could not
+    # build it (e.g. the key was added later), try once more now.
+    graph = getattr(request.app.state, "graph", None)
+    if graph is None:
+        try:
+            graph = build_graph()
+        except MissingAPIKeyError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"AI agent unavailable: {e}",
+            )
+        request.app.state.graph = graph
+
     sources = []
 
     if log_file:
@@ -114,9 +129,6 @@ async def analyze_incident(
     timeline = build_timeline(sources)
     embed_timeline(timeline, incident_id)
 
-    # Re-use the module-level singleton graph; fall back to building one if
-    # startup failed (e.g. API key added after server start).
-    from agent.graph import run_agent
-    result = run_agent(incident_id, timeline, graph=_graph)
+    result = run_agent(incident_id, timeline, graph=graph)
 
     return JSONResponse({"incident_id": incident_id, "postmortem": result})

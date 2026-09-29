@@ -1,7 +1,7 @@
 """
 evaluation/naive_baseline.py
 
-A simple keyword-matching baseline for InfraLens.
+A simple keyword-matching baseline for the incident analysis agent.
 Used as a lower-bound comparison against the LLM agent:
 if the agent doesn't beat this, something is wrong.
 

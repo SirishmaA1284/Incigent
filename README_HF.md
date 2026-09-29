@@ -1,5 +1,5 @@
 ---
-title: InfraLens
+title: Incident Analysis
 emoji: 🔬
 colorFrom: blue
 colorTo: indigo

@@ -1,5 +1,5 @@
 """
-evaluation/human_baseline.py — Compare InfraLens output against a human-written
+evaluation/human_baseline.py — Compare the agent's output against a human-written
 post-mortem for the same incident.
 
 This gives a rough inter-rater agreement score: how closely does the AI output

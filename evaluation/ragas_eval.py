@@ -1,5 +1,5 @@
 """
-evaluation/ragas_eval.py — RAGAS-style evaluation for InfraLens post-mortems.
+evaluation/ragas_eval.py — RAGAS-style evaluation for generated post-mortems.
 
 Metrics implemented (no LLM judge required for the core three):
   - faithfulness        : cited evidence lines are present verbatim in the source timeline
@@ -187,7 +187,7 @@ def run_evaluation(
 
 def print_report(results: dict) -> None:
     print(f"\n{'='*58}")
-    print(f"  InfraLens Evaluation — {results['incident_id']}")
+    print(f"  Post-Mortem Evaluation — {results['incident_id']}")
     print(f"{'='*58}")
     print(f"  Reported confidence : {results['confidence_reported'].upper()}")
     print(f"  Aggregate score     : {results['aggregate_score']:.3f}  [{results['grade']}]")
@@ -199,7 +199,7 @@ def print_report(results: dict) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate an InfraLens post-mortem.")
+    parser = argparse.ArgumentParser(description="Evaluate a generated post-mortem.")
     parser.add_argument("--postmortem", type=str, default=None,
                         help="Path to postmortem JSON (default: uses built-in demo output).")
     parser.add_argument("--timeline", type=str, default=None,
