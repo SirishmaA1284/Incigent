@@ -12,6 +12,8 @@ venv/
 
 # Local data stores
 chroma_db/
+# Approval records and paused-workflow checkpoints (SQLite)
+var/
 
 # Logs / OS
 *.log

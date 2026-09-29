@@ -7,10 +7,13 @@ There is no module-level graph or LLM cache. Callers that want to reuse a
 graph (the API) build one with build_graph() and pass it to run_agent();
 tests inject their own graph or LLM the same way.
 
-Flow: recall_memory -> record_intake -> analyst <-> tools.
+Flow: recall_memory -> record_intake -> analyst <-> tools
+      -> propose_action -> request_approval -> await_approval (interrupt) -> validate_approval.
 Current-incident evidence comes from the timeline and Chroma (search_timeline).
 Historical operational memory comes from the MemoryRecorder, passed per run in
 config["configurable"]["memory_recorder"]; it is advisory context only.
+Human approval runs only when an ApprovalService is passed and the graph has a
+checkpointer; approvals are enforced by the application database, not memory.
 """
 
 import os
@@ -18,8 +21,9 @@ import json
 import operator
 import re
 import traceback
+import uuid
 from datetime import datetime
-from typing import TypedDict, Annotated
+from typing import Any, Optional, TypedDict, Annotated
 
 from dotenv import load_dotenv, find_dotenv
 from langchain_openai import ChatOpenAI
@@ -27,10 +31,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
 
 from agent.tools import search_timeline
 from agent.prompts import SYSTEM_PROMPT, ROOT_CAUSE_PROMPT
 from agent.memory_context import build_incident_profile, build_recall_query, format_memory_context
+from agent.approval_flow import (
+    await_approval_node, propose_action_node, request_approval_node, route_after_proposal,
+    route_after_validation, validate_approval_node,
+)
 
 load_dotenv(find_dotenv())
 
@@ -44,6 +53,10 @@ class AgentState(TypedDict):
     recalled_memories: list         # normalized historical memories (dicts), never raw client objects
     memory_status: dict             # recall outcome: status, backend, query, error
     memory_retention: Annotated[list, operator.add]
+    proposed_action: Optional[dict] # canonical action payload awaiting human approval
+    approval_request: dict          # approval_id, kind, action_hash, expires_at (from the approval DB)
+    approval_resume: Any            # raw resume value; only ever used as a reference, never trusted
+    approval_result: dict           # outcome of application-side validation
 
 
 tools = [search_timeline]
@@ -116,12 +129,14 @@ def record_intake_node(state: AgentState, config: RunnableConfig):
     return {"memory_retention": [o.to_dict() for o in outcomes]}
 
 
-def build_graph(llm=None):
+def build_graph(llm=None, checkpointer=None):
     """
     Compile a new agent graph.
 
     llm: a tool-bound chat model (anything with .invoke(messages)). Defaults to
     get_llm(), which raises MissingAPIKeyError when OPENAI_API_KEY is missing.
+    checkpointer: a LangGraph checkpointer (e.g. SqliteSaver). Required for the
+    approval interrupt to pause and later resume.
     """
     if llm is None:
         llm = get_llm()
@@ -139,12 +154,22 @@ def build_graph(llm=None):
     graph.set_entry_point("recall_memory")
     graph.add_edge("recall_memory", "record_intake")
     graph.add_edge("record_intake", "analyst")
+    graph.add_node("propose_action", propose_action_node)
+    graph.add_node("request_approval", request_approval_node)
+    graph.add_node("await_approval", await_approval_node)
+    graph.add_node("validate_approval", validate_approval_node)
     graph.add_conditional_edges("analyst", should_continue, {
         "tools": "tools",
-        "end": END,
+        "end": "propose_action",
     })
     graph.add_edge("tools", "analyst")
-    return graph.compile()
+    graph.add_conditional_edges("propose_action", route_after_proposal,
+                                {"request_approval": "request_approval", "end": END})
+    graph.add_edge("request_approval", "await_approval")
+    graph.add_edge("await_approval", "validate_approval")
+    graph.add_conditional_edges("validate_approval", route_after_validation,
+                                {"await_approval": "await_approval", "end": END})
+    return graph.compile(checkpointer=checkpointer)
 
 
 def _extract_json_from_text(text: str) -> dict:
@@ -203,9 +228,25 @@ def _only_recalled_incidents(similar: list, memories: list) -> list:
     return [s for s in similar if isinstance(s, str) and any(i in s for i in recalled_ids)]
 
 
-def run_agent(incident_id: str, timeline: list, graph=None, recorder=None) -> dict:
+def _workflow(result: dict, thread_id) -> dict:
+    """Where the approval workflow stands after an invoke. Nothing is ever executed."""
+    if result.get("__interrupt__"):
+        status = "awaiting_approval"
+    else:
+        status = {"validated": "approval_validated", "denied": "approval_denied"}.get(
+            (result.get("approval_result") or {}).get("status"), "completed")
+    return {"status": status, "thread_id": thread_id}
+
+
+def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
+              approvals=None, thread_id: Optional[str] = None) -> dict:
     """
     Run the LangGraph agent and return a structured post-mortem dict.
+
+    approvals: an approvals.ApprovalService. When given and the graph has a
+    checkpointer, the top recommendation becomes a pending approval request and
+    the graph pauses (result["workflow"]["status"] == "awaiting_approval").
+    Resume with resume_agent(). Nothing is ever executed by this stage.
 
     graph: a compiled graph from build_graph(). When None, a new graph is
     built for this call (raises MissingAPIKeyError if OPENAI_API_KEY is missing).
@@ -271,6 +312,12 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None) -> di
     try:
         if graph is None:
             graph = build_graph()
+        configurable = {"memory_recorder": recorder, "approval_service": approvals}
+        if getattr(graph, "checkpointer", None) is not None:
+            thread_id = thread_id or f"{incident_id}:{uuid.uuid4().hex[:12]}"
+            configurable["thread_id"] = thread_id
+        else:
+            thread_id = None
         result = graph.invoke(
             {
                 "messages": [HumanMessage(content=prompt)],
@@ -281,8 +328,11 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None) -> di
                 "recalled_memories": [],
                 "memory_status": {},
                 "memory_retention": [],
+                "proposed_action": None,
+                "approval_request": {},
+                "approval_result": {},
             },
-            config={"configurable": {"memory_recorder": recorder}},
+            config={"configurable": configurable},
         )
 
         raw_content = result["messages"][-1].content
@@ -322,6 +372,10 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None) -> di
         # memory: they are unverified until a human decision validates them,
         # and the system must not learn from its own guesses.
         postmortem["memory_retention"] = list(result.get("memory_retention") or [])
+
+        # Approval state comes from the application approval store via the graph.
+        postmortem["workflow"] = _workflow(result, thread_id)
+        postmortem["approval"] = dict(result.get("approval_request") or {}) or None
         return postmortem
 
     except MissingAPIKeyError:
@@ -347,3 +401,30 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None) -> di
                                   "error": "analysis failed before completing"},
             "_error_traceback": tb,
         }
+
+
+class WorkflowNotAwaitingApproval(Exception):
+    """The thread does not exist or is not paused at an approval checkpoint."""
+
+
+def resume_agent(thread_id: str, approval_id: str, *, graph, approvals) -> dict:
+    """
+    Resume a paused workflow after a human decision. The resume value is only a
+    reference ({"approval_id": ...}); the graph re-checks the approval in the
+    application database. This function never accepts or forwards a decision.
+    """
+    config = {"configurable": {"thread_id": thread_id, "approval_service": approvals,
+                               "memory_recorder": None}}
+    snapshot = graph.get_state(config)
+    if not snapshot or "await_approval" not in (snapshot.next or ()):
+        raise WorkflowNotAwaitingApproval(f"thread {thread_id!r} is not awaiting approval")
+    result = graph.invoke(Command(resume={"approval_id": str(approval_id)}), config=config)
+    request = result.get("approval_request") or {}
+    record = approvals.get(request.get("approval_id", "")) if request else None
+    return {
+        "thread_id": thread_id,
+        "incident_id": result.get("incident_id"),
+        "workflow": _workflow(result, thread_id),
+        "approval_result": result.get("approval_result") or {},
+        "approval": record.to_dict() if record else None,
+    }

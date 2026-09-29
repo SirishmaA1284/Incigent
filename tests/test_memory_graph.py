@@ -298,7 +298,7 @@ def test_api_passes_memory_recorder_and_reports_recall(monkeypatch):
     recorder = MemoryRecorder(FakeMemory())
     seed_incident_1(recorder)
     llm = ScriptedLLM([final_json(similar_past_incidents=[f"{INC1}: restart rejected, rollback worked"])])
-    monkeypatch.setattr(api_main, "build_graph", lambda: build_graph(llm=llm))
+    monkeypatch.setattr(api_main, "build_graph", lambda **kw: build_graph(llm=llm, **kw))
     monkeypatch.setattr(api_main, "build_memory_recorder", lambda: recorder)
     monkeypatch.setattr(api_main, "embed_timeline", lambda tl, iid: None)
     with TestClient(api_main.app) as client:
@@ -312,7 +312,7 @@ def test_api_without_hindsight_config_reports_memory_disabled(monkeypatch):
     for var in ("HINDSIGHT_API_URL", "HINDSIGHT_BANK_ID", "HINDSIGHT_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     llm = ScriptedLLM([final_json()])
-    monkeypatch.setattr(api_main, "build_graph", lambda: build_graph(llm=llm))
+    monkeypatch.setattr(api_main, "build_graph", lambda **kw: build_graph(llm=llm, **kw))
     monkeypatch.setattr(api_main, "embed_timeline", lambda tl, iid: None)
     with TestClient(api_main.app) as client:
         pm = _post(client, INC2).json()["postmortem"]

@@ -52,7 +52,7 @@ def test_analyze_reaches_the_langgraph_agent(monkeypatch, embedded):
         AIMessage(content="", tool_calls=[{"name": "search_timeline", "args": {"query": "pool"}, "id": "c1"}]),
         AIMessage(content=FINAL_JSON),
     ])
-    monkeypatch.setattr(api_main, "build_graph", lambda: real_build_graph(llm=llm))
+    monkeypatch.setattr(api_main, "build_graph", lambda **kw: real_build_graph(llm=llm, **kw))
 
     with TestClient(api_main.app) as client:
         r = client.post("/analyze", data={"incident_id": "INC-API-1"},
@@ -69,7 +69,7 @@ def test_analyze_reaches_the_langgraph_agent(monkeypatch, embedded):
 
 
 def test_analyze_without_api_key_returns_503_and_skips_work(monkeypatch, embedded):
-    def no_key():
+    def no_key(**kw):
         raise MissingAPIKeyError("OPENAI_API_KEY not set.")
 
     monkeypatch.setattr(api_main, "build_graph", no_key)
@@ -97,7 +97,7 @@ def test_analyze_with_real_missing_key_returns_503(monkeypatch, embedded):
 def test_unrelated_oserror_during_graph_build_is_not_a_503(monkeypatch, embedded):
     calls = []
 
-    def build():
+    def build(**kw):
         calls.append(1)
         if len(calls) == 1:  # startup: no key yet
             raise MissingAPIKeyError("OPENAI_API_KEY not set.")
@@ -120,7 +120,7 @@ def test_chroma_oserror_during_analysis_is_an_agent_error_not_missing_key(monkey
     llm = ScriptedLLM([
         AIMessage(content="", tool_calls=[{"name": "search_timeline", "args": {"query": "pool"}, "id": "c1"}]),
     ])
-    monkeypatch.setattr(api_main, "build_graph", lambda: real_build_graph(llm=llm))
+    monkeypatch.setattr(api_main, "build_graph", lambda **kw: real_build_graph(llm=llm, **kw))
 
     with TestClient(api_main.app) as client:
         r = client.post("/analyze", data={"incident_id": "INC-API-5"},

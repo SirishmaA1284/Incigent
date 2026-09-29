@@ -43,7 +43,7 @@ def test_guard_blocks_real_client_and_nothing_is_retained(real_looking_env, hind
 
 def test_api_with_real_config_and_no_stub_still_cannot_reach_hindsight(real_looking_env, hindsight_guard, monkeypatch):
     llm = ScriptedLLM([final_json()])
-    monkeypatch.setattr(api_main, "build_graph", lambda: build_graph(llm=llm))
+    monkeypatch.setattr(api_main, "build_graph", lambda **kw: build_graph(llm=llm, **kw))
     monkeypatch.setattr(api_main, "embed_timeline", lambda tl, iid: None)
     with TestClient(api_main.app) as client:
         pm = client.post("/analyze", data={"incident_id": "INC-ISO-2"},

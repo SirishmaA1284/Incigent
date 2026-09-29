@@ -104,6 +104,42 @@ Normal test runs never contact Hindsight, even with real credentials in `.env`: 
 
 ---
 
+## Human approval (no actions are executed yet)
+
+After analysis, the top recommendation (first P1, else first) becomes a canonical action payload and a **pending approval** in an application-owned SQLite database (`APPROVAL_DB_PATH`). The graph then pauses with LangGraph's `interrupt()`; its state is checkpointed to SQLite (`CHECKPOINT_DB_PATH`), so it can resume after a restart.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /approvals/{id}` | Approval record and its audit log |
+| `POST /approvals/{id}/approve` | Form: `actor`, optional `reason` |
+| `POST /approvals/{id}/reject` | Form: `actor`, `reason` (required) |
+| `POST /workflows/{thread_id}/resume` | Form: `approval_id` — resumes the paused analysis |
+| `POST /approvals` | **Development/demo only**, disabled unless `ENABLE_DEV_APPROVAL_ENDPOINT=1`. JSON: `incident_id`, `kind`, `payload` |
+
+Resuming passes only the approval ID. The application looks the approval up and checks that it belongs to this incident, has the expected kind, has the same SHA-256 hash of the canonical action payload, is approved, and has not expired or been used. Sending `approved=true` does nothing. Approval is never read from long-term memory, and approval events are not retained there.
+
+**Consume before act.** No consequential action may execute unless its approval has been successfully *consumed*:
+
+```
+validate approval  →  atomically consume approval  →  execute action
+```
+
+- `validate()` establishes that an approval is valid *right now*. It changes nothing and is not permission to act.
+- `consume()` is the one-time authorization handoff immediately before execution: it re-checks everything and marks the approval `consumed` in one transaction, so it succeeds at most once.
+- An executor must never execute after validation alone. This stage has no executor: the graph stops after validation, and approvals stay `approved`, not consumed.
+
+**The direct `POST /approvals` endpoint** is for development and demos only and returns 404 unless `ENABLE_DEV_APPROVAL_ENDPOINT=1`. It is not an authorization path: it creates a *pending* approval (recorded as `requested_by="dev-endpoint"`) that still needs a human decision and still has to pass the same validate/consume checks for the exact incident, kind and payload. It cannot resume an analysis workflow, which only accepts the approval that workflow created. The intended flow is: analysis proposes an action → the application creates the approval → a human decides → the executor validates and consumes → the action runs.
+
+**One analysis, one proposed action, one approval.** Only the top recommendation is proposed; other action items get no approval and cannot run. A future version must decide whether multiple actions need separate approvals or whether an explicitly defined action bundle can share one.
+
+**Expiration is lazy.** There is no background worker or scheduler. An approval past its expiry time is marked `expired` (and audited) the next time it is touched — approve, reject, validate, consume or expire. Until then its stored status may still read `pending` or `approved`, but every path that could act on it checks expiry first, so an expired approval can never be approved or consumed and is never revived.
+
+**Checkpoint data is sensitive.** `CHECKPOINT_DB_PATH` (default `var/checkpoints.sqlite3`) holds full paused-workflow state: incident IDs, log and ticket excerpts, model messages and the proposed action. `APPROVAL_DB_PATH` holds approval payloads and the audit log. `var/` is gitignored — never commit these files or share them casually, and in production put them on protected storage with restricted access. They are not encrypted by this application. Anyone who can write to them can alter workflow or approval state.
+
+`actor` is a self-declared name recorded in the audit log, not authenticated identity: the API has only the shared `INCIDENT_API_TOKEN`. Per-user authentication is future work.
+
+---
+
 ## Evaluation
 
 `evaluation/ragas_eval.py` implements RAGAS-style string-matching metrics (faithfulness, context recall, answer relevance, citation coverage):

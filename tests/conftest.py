@@ -16,6 +16,14 @@ except ImportError:  # client not installed: real access is impossible anyway
     _hindsight_client = None
 
 
+@pytest.fixture(autouse=True)
+def isolated_state_dbs(tmp_path, monkeypatch):
+    """Approval and workflow-checkpoint SQLite files go to a per-test temp dir,
+    never into the repository's var/ directory."""
+    monkeypatch.setenv("APPROVAL_DB_PATH", str(tmp_path / "approvals.sqlite3"))
+    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(tmp_path / "checkpoints.sqlite3"))
+
+
 class RealHindsightBlocked(RuntimeError):
     """Raised when a normal (non-live) test tries to build a real Hindsight client."""
 
