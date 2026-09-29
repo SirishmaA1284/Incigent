@@ -10,7 +10,9 @@ pinned: false
 ---
 # Incident Analysis — AI-Assisted Incident Post-Mortem Generator
 
-Ingests raw incident data (server logs, Slack threads, Jira tickets) and produces a structured post-mortem — root cause, evidence citations, action items, and a confidence level — using a GPT-4o LangGraph agent with retrieval over the incident's own evidence.
+Ingests raw incident data (server logs, Slack threads, Jira tickets) and produces a structured post-mortem — root cause, evidence citations, action items, and a confidence level — using a LangGraph agent (any OpenAI-compatible chat model) with retrieval over the incident's own evidence and long-term operational memory.
+
+**AI proposes. Memory informs. Humans authorize. System verifies.** The agent recalls prior validated operational experience from Hindsight before reasoning, proposes a remediation, pauses for human approval, executes only after the approval is atomically consumed (against a deterministic simulator), verifies the outcome independently, and retains **only** human-approved, successfully verified outcomes as learned operational memory.
 
 ---
 
@@ -21,15 +23,15 @@ pip install -r requirements.txt
 streamlit run ui/app.py
 ```
 
-Choose **Demo — pre-loaded P1 outage** and click **Generate**. If the API is not running (or has no OpenAI key), the UI produces a rule-based report that is clearly labelled **Offline heuristic mode**, states why the AI agent did not run, and does not claim to recall any historical incidents.
+Choose **Demo — pre-loaded P1 outage** and click **Generate**. If the API is not running (or has no chat provider key), the UI produces a rule-based report that is clearly labelled **Offline heuristic mode**, states why the AI agent did not run, and does not claim to recall any historical incidents.
 
 ---
 
-## Full AI mode (GPT-4o)
+## Full AI mode
 
 ```bash
 cp .env.example .env
-# Add your OPENAI_API_KEY to .env
+# Add your OPENAI_API_KEY (or an OpenAI-compatible provider key — see below)
 
 # Terminal 1 — REST API
 uvicorn api.main:app --reload
@@ -38,7 +40,34 @@ uvicorn api.main:app --reload
 streamlit run ui/app.py
 ```
 
-Every report shows its analysis mode: **AI agent analysis**, **AI agent failed**, or **Offline heuristic mode**. Without an OpenAI key, `POST /analyze` returns HTTP 503 rather than a substitute result.
+Every report shows its analysis mode: **AI agent analysis**, **AI agent failed**, or **Offline heuristic mode**. Without a working chat provider key, `POST /analyze` returns HTTP 503 rather than a substitute result.
+
+### LLM provider — OpenAI or any OpenAI-compatible endpoint (e.g. OpenCode Go)
+
+The chat model is selected entirely through environment variables; there is no hard-coded provider or key.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPENAI_API_KEY` | — | The provider's API key (OpenAI, or the OpenAI-compatible gateway's key) |
+| `OPENAI_BASE_URL` | (OpenAI) | Base URL of an OpenAI-compatible chat API. Leave unset for OpenAI itself |
+| `OPENAI_MODEL` | `gpt-4o` | Model name, e.g. `deepseek-v4.1-flash` on OpenCode Go |
+
+For example, with an OpenCode Go subscription:
+
+```bash
+OPENAI_BASE_URL=https://opencode.ai/zen/go/v1
+OPENAI_MODEL=deepseek-v4.1-flash
+```
+
+When `OPENAI_BASE_URL` is set, the client also sends a stable per-process `x-opencode-session` header and a `User-Agent` identifying the application (some gateways require the session header). Tool calling (`search_timeline`) works through the same endpoint.
+
+**Embeddings are separate.** Chat gateways usually do not offer an embeddings API. The current-incident evidence index (ChromaDB) therefore has its own selector:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EMBEDDINGS_PROVIDER` | `openai` | `openai` = `text-embedding-3-small` via `OPENAI_API_KEY`; `local` = Chroma's built-in embedding model (no API key, downloaded once, stored in a separate `_local` collection) |
+
+Use `EMBEDDINGS_PROVIDER=local` with gateways that only provide chat, so Chroma retrieval keeps working without an OpenAI key. The embedder and the retriever always use the same provider, so vectors and queries stay consistent.
 
 ### API authentication
 
@@ -58,19 +87,52 @@ Logs + Slack + Tickets
    Timeline builder        Unified chronological event stream, deduped, sorted,
                            numbered with event IDs, silence gaps marked
         │
-   Evidence index          ChromaDB · text-embedding-3-small · 5-minute window chunks
-   (embedder / retriever)  scoped per incident; chunks carry their event IDs
+   Evidence index          ChromaDB · text-embedding-3-small (or local) · 5-minute
+   (embedder / retriever)  window chunks scoped per incident; chunks carry event IDs
         │
-   LangGraph agent         recall_memory → record_intake → analyst ⇄ tools
-                           GPT-4o · search_timeline() (incident ID injected from graph state)
+   LangGraph agent         recall_memory → record_intake → inspect_repository (read-only)
+                           → analyst ⇄ tools → propose_action → request approval
+                           OpenAI-compatible chat (gpt-4o default, or OpenCode Go)
+                           · search_timeline() (incident ID injected from graph state)
         │                         ▲ historical memory (advisory)
-   FastAPI + Streamlit     REST API · UI with event filters · JSON + Markdown export
+   Approval boundary       await_approval (interrupt) — AI recommends, a human
+   (application-owned      authorizes. Consume-before-act: validate → consume → execute
+    SQLite + checkpointer)
+        │
+   Remediation (simulated) Executor → simulator (INC-SIM-001…004) → verifier (reads
+   + verification          simulator state, never the executor's report)
+        │
+   Validated memory        Only approved + executed + verified outcomes are retained
+                           to Hindsight: human_decision, action, verification, lesson
 
-   Long-term memory        Hindsight (optional) via memory/ — past incidents, diagnoses,
-                           recommendations, human decisions, actions, outcomes, lessons
+   FastAPI + Streamlit     REST API · UI with event filters, approval & execution
+                           panel, JSON + Markdown export
+
+   Long-term memory        Hindsight (optional) via memory/ — past incidents,
+                           validated decisions, actions, outcomes, lessons
 ```
 
 Chroma holds only the **current incident's evidence**. Hindsight holds **long-term operational memory** across incidents. Recalled memory is advisory context: it never authorizes an action and is not an approval or audit store.
+
+### Trust model
+
+```
+AI proposes.  Memory informs.  Humans authorize.  System verifies.
+```
+
+- **Hindsight is advisory only.** It is recalled before any reasoning, is shown to the model as separate, untrusted historical context, and can never approve, resume or execute anything.
+- **Human approval is the authorization boundary.** The workflow pauses at an `interrupt()` until a human decides; nothing executes while the approval is pending, and a resume attempt before a decision is refused.
+- **Consume before act.** An executor runs only after `consume()` atomically succeeds for the exact approved payload (one approval, at most one execution).
+- **Verification decides success.** An independent verifier reads the simulated environment — not the executor's report. Executed ≠ recovered.
+- **Only validated outcomes are learned.** Automatically recorded memory is limited to intake milestones (`incident`, `evidence_digest`). A `human_decision`, `action`, `verification` and `lesson` are retained **only** after approval + execution + passing verification. Failed or unverified remediation retains nothing, and the system never learns from its own unverified guesses.
+
+```
+Memory lifecycle
+  incident ──► evidence_digest          (automatic, always)
+  diagnosis / recommendation            (never automatic — model-generated, unverified)
+  human_decision ─► action ─► verification ─► lesson
+        (retained only after: human approval + execution + verified outcome)
+```
 
 ---
 
@@ -225,6 +287,26 @@ analyst → prepare_patch (read-only validation) → repository_apply approval �
 
 ---
 
+## Demo walkthrough — the learning loop in one minute
+
+The built-in demo data is the P1 DB pool exhaustion outage. The simulator scenarios `INC-SIM-001…004` make approved actions actually execute against deterministic, in-memory state — nothing real is touched.
+
+**Incident 1 — `INC-SIM-001`** (connection leak in order-service v2.4.1 during peak traffic; rollback heals, restart/scale do not):
+
+1. Start the API and UI (see Full AI mode), choose **Demo — pre-loaded P1 outage**, keep `INC-SIM-001`, click **Generate**.
+2. The trust-flow banner shows the loop paused at **Human approval**; the approval panel shows the AI's recommendation and the exact payload + hash. The backend refuses a resume while the approval is pending — **nothing has been executed**.
+3. Enter your name, click **Approve and resume workflow**. The backend validates and atomically consumes the approval, executes the rollback against the simulator, then verifies independently.
+4. The panel shows **Executed** → **Verified** → **Retained to Hindsight** (`human_decision`, `action`, `verification`, `lesson`). The banner turns fully green: approved → executed → verified → learned.
+
+**Incident 2 — `INC-SIM-002`** (transient pool exhaustion; restart heals):
+
+5. Click **New Analysis**, switch the incident ID to `INC-SIM-002`, click **Generate**.
+6. The Memory tab shows **recalled historical memory from INC-SIM-001** — the validated rollback precedent — visually separated from the current incident's evidence, with green "learned" badges. The model cites it as advisory context (`similar_past_incidents`, `memory_influence`) but must still verify it against the current evidence.
+
+Key demo moments to point at: the approval boundary ("AI recommends; human authorizes"), the resume-refusal while pending, the independent verification step, and that Incident 2 recalls **only validated** Incident 1 outcomes — unverified guesses are never learned.
+
+---
+
 ## Evaluation
 
 `evaluation/ragas_eval.py` implements RAGAS-style string-matching metrics (faithfulness, context recall, answer relevance, citation coverage):
@@ -261,12 +343,15 @@ Without `--postmortem` it scores a built-in sample post-mortem, not live agent o
 
 | Layer | Technology |
 |---|---|
-| Agent orchestration | LangGraph (conditional tool-calling loop) |
-| LLM | GPT-4o (temperature 0, JSON output requested in the prompt) |
-| Vector store (current incident) | ChromaDB + text-embedding-3-small |
-| Long-term memory (optional) | Hindsight (`hindsight-client`) |
+| Agent orchestration | LangGraph (conditional tool-calling loop, interrupt-based approval) |
+| LLM | OpenAI-compatible chat — GPT-4o default, or any gateway (e.g. OpenCode Go via `OPENAI_BASE_URL`/`OPENAI_MODEL`; temperature 0, JSON output requested in the prompt) |
+| Vector store (current incident) | ChromaDB + text-embedding-3-small (or Chroma's local embedding model) |
+| Long-term memory (optional) | Hindsight (`hindsight-client`) — advisory, recall-before-reasoning |
+| Approvals & checkpoints | Application-owned SQLite (approval store + LangGraph checkpointer) |
+| Remediation | Deterministic in-memory simulator (no shell/network/infra), consume-gated executor, independent verifier |
+| Repository inspection / patching | Read-only dulwich inspector; worktree-isolated candidate patching after approval |
 | API | FastAPI + uvicorn |
-| UI | Streamlit (event filters, JSON + Markdown export) |
+| UI | Streamlit (event filters, trust-loop banner, approval & execution panel, JSON + Markdown export) |
 | Evaluation | RAGAS-style custom metrics |
 
 ---
@@ -282,6 +367,14 @@ python -m pytest -m hindsight_live -v
 ```
 
 The default suite needs no OpenAI key and no Hindsight server; memory tests use an in-process fake that is never used by the application itself.
+
+Current status on `feat/safe-repository-patching`:
+
+```
+624 passed, 1 skipped, 2 deselected
+```
+
+(`2 deselected` are the `-m live` tests, which call the real chat provider; `1 skipped` is the `-m hindsight_live` test. Both are opt-in.)
 
 ---
 

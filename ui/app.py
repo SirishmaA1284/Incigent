@@ -297,6 +297,92 @@ div[data-testid="stVerticalBlock"] { gap: 0 !important; }
 
 .divider { height: 1px; background: #e0d9d1; margin: 2.5rem 0 2rem; }
 
+/* TRUST LOOP — one glance: where the workflow stands */
+.trust-flow {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 0;
+    background: #fff; border: 1px solid #e0d9d1; border-radius: 12px;
+    padding: 0.85rem 1.1rem; margin-bottom: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.trust-step {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: 'DM Mono', monospace; font-size: 0.6rem; font-weight: 500;
+    color: #b5adaa; padding: 4px 10px; border-radius: 20px;
+    border: 1px solid #e8e3dc; background: #faf8f5; white-space: nowrap;
+}
+.trust-step.done    { color: #2d7a4d; border-color: rgba(91,179,122,0.35); background: rgba(91,179,122,0.08); }
+.trust-step.now     { color: #8f5e12; border-color: rgba(222,158,65,0.45); background: rgba(222,158,65,0.1);
+                      box-shadow: 0 0 0 3px rgba(222,158,65,0.12); }
+.trust-step.blocked { color: #a02828; border-color: rgba(192,57,43,0.32); background: rgba(192,57,43,0.07); }
+.trust-arrow { color: #d9d1c9; font-family: 'DM Mono', monospace; font-size: 0.7rem; padding: 0 2px; }
+.trust-note {
+    width: 100%; margin-top: 8px; padding-top: 8px;
+    border-top: 1px dashed #e8e3dc;
+    font-size: 0.8rem; color: #5a5450; line-height: 1.65;
+}
+.trust-note b { color: #1c1917; font-weight: 600; }
+
+/* APPROVAL GATE — the human authorization boundary */
+.gate {
+    display: flex; align-items: flex-start; gap: 11px;
+    background: #fff; border: 1.5px solid rgba(222,158,65,0.45);
+    border-radius: 11px; padding: 0.75rem 1rem; margin: 0.5rem 0 1.1rem;
+    font-size: 0.83rem; color: #3a3530; line-height: 1.65;
+}
+.gate-icon { font-size: 1.1rem; flex-shrink: 0; margin-top: 1px; }
+.gate b { color: #8f5e12; font-weight: 600; }
+.gate.ok { border-color: rgba(91,179,122,0.42); background: rgba(91,179,122,0.05); }
+.gate.ok b { color: #2d7a4d; }
+.gate.no { border-color: rgba(192,57,43,0.35); background: rgba(192,57,43,0.05); }
+.gate.no b { color: #a02828; }
+
+/* RECALLED MEMORY BADGES — distinguish learned vs advisory vs decisions */
+.mem-badge {
+    display: inline-block; font-family: 'DM Mono', monospace;
+    font-size: 0.58rem; font-weight: 600; padding: 2px 7px; border-radius: 4px;
+    background: rgba(124,111,205,0.1); color: #5a4fa0; border: 1px solid rgba(124,111,205,0.22);
+    margin-right: 7px; vertical-align: middle; white-space: nowrap;
+}
+.mem-badge.learned  { background: rgba(91,179,122,0.1); color: #2d7a4d; border-color: rgba(91,179,122,0.28); }
+.mem-badge.decision { background: rgba(56,152,220,0.1); color: #1a5e99; border-color: rgba(56,152,220,0.25); }
+.mem-badge.context  { background: rgba(222,158,65,0.09); color: #8f5e12; border-color: rgba(222,158,65,0.25); }
+.mem-note {
+    font-family: 'DM Mono', monospace; font-size: 0.6rem; color: #9c9189;
+    margin: 6px 0 12px; letter-spacing: 0.03em;
+}
+
+/* REPOSITORY EVIDENCE — blue accent, separate from timeline evidence */
+.repo-section {
+    background: #fff; border: 1px solid #e8e3dc; border-left: 3px solid #1a5e99;
+    border-radius: 12px; padding: 1.2rem 1.5rem; margin-bottom: 1.5rem;
+}
+.repo-kicker {
+    font-family: 'DM Mono', monospace; font-size: 0.58rem; font-weight: 600;
+    color: #1a5e99; letter-spacing: 0.15em; text-transform: uppercase;
+    margin-bottom: 10px;
+}
+.repo-status {
+    font-size: 0.78rem; color: #5a5450; margin-bottom: 10px; line-height: 1.6;
+}
+.rev-item {
+    background: rgba(56,152,220,0.04);
+    border: 1px solid rgba(56,152,220,0.16);
+    border-left: 2.5px solid rgba(56,152,220,0.55);
+    border-radius: 0 9px 9px 0;
+    padding: 9px 13px; margin-bottom: 7px;
+    font-family: 'DM Mono', monospace; font-size: 0.74rem; color: #3a3530;
+    line-height: 1.65; word-break: break-word;
+}
+.rev-badge {
+    display: inline-block; font-size: 0.55rem; font-weight: 700;
+    padding: 1px 6px; border-radius: 3px; margin-right: 6px; vertical-align: middle;
+}
+.rev-badge.observed      { background: rgba(91,179,122,0.12); color: #2d7a4d; }
+.rev-badge.inference     { background: rgba(222,158,65,0.12); color: #8f5e12; }
+.rev-badge.hypothesis    { background: rgba(124,111,205,0.12); color: #5a4fa0; }
+.rev-badge.recommendation{ background: rgba(56,152,220,0.14); color: #1a5e99; }
+.rev-id { color: #1a5e99; font-weight: 600; }
+
 .report-card {
     background: #fff;
     border: 1px solid #e8e3dc;
@@ -788,6 +874,117 @@ def _call_api(iid, lb, sb, tb):
 # ══════════════════════════════════════════════════════════════════
 # RENDER REPORT
 # ══════════════════════════════════════════════════════════════════
+TRUST_STEPS = ["Current evidence", "Hindsight memory", "Root cause", "AI recommendation",
+               "Human approval", "Action", "Verification", "Learned memory"]
+
+
+def _flow_html(done, now, blocked, note):
+    """Trust-loop banner: done steps in green, the current step highlighted,
+    a blocked step in red, everything else grey."""
+    chips = []
+    for i, label in enumerate(TRUST_STEPS):
+        cls = "trust-step"
+        if i == blocked:
+            cls += " blocked"
+        elif i == now:
+            cls += " now"
+        elif i < done:
+            cls += " done"
+        chips.append(f'<span class="{cls}">{html.escape(label)}</span>')
+    arrows = '<span class="trust-arrow">→</span>'
+    return (f'<div class="trust-flow">' + arrows.join(chips)
+            + f'<div class="trust-note">{note}</div></div>')
+
+
+def trust_flow(pm, wf_status):
+    """HTML for the trust-loop banner, or None when there is nothing to show.
+    The banner reads state only — it never decides, executes or verifies."""
+    if pm.get("analysis_mode") != "llm_agent":
+        return None
+    if pm.get("proposal_rejection"):
+        return _flow_html(done=4, now=None, blocked=3,
+                          note="The AI's remediation proposal was invalid, so <b>no approval was created</b> and "
+                               "nothing can run.")
+    if wf_status == "awaiting_approval":
+        return _flow_html(done=4, now=4, blocked=None,
+                          note="Paused at the approval boundary — <b>the AI recommends, a human authorizes.</b> "
+                               "Nothing has been executed, and nothing will run until a human decides.")
+    if wf_status == "remediation_verified":
+        return _flow_html(done=8, now=None, blocked=None,
+                          note="Human-approved action executed, independently <b>verified</b>, and retained as "
+                               "validated operational memory in Hindsight.")
+    if wf_status == "remediation_unverified":
+        return _flow_html(done=6, now=6, blocked=6,
+                          note="The action executed, but <b>verification failed</b> — recovery was not confirmed, "
+                               "so nothing was learned. Executed ≠ recovered.")
+    if wf_status in ("approval_validated", "completed"):
+        return _flow_html(done=4, now=None, blocked=None,
+                          note="Analysis complete. No executable remediation was proposed, so nothing was executed "
+                               "and nothing was learned.")
+    return None
+
+
+def _live_wf_status(pm):
+    """Live workflow status when a thread exists; falls back to the post-mortem
+    snapshot so the banner never lies or breaks when the API is unreachable."""
+    wf_status = (pm.get("workflow") or {}).get("status")
+    thread_id = (pm.get("workflow") or {}).get("thread_id")
+    if thread_id:
+        ok, wf = _api("GET", f"/workflows/{thread_id}")
+        if ok:
+            wf_status = (wf.get("workflow") or {}).get("status") or wf_status
+    return wf_status
+
+
+def _mem_badge(event_type):
+    cls, label = "mem-badge", str(event_type or "memory")
+    if event_type in ("action", "verification", "lesson"):
+        cls += " learned"          # validated, learned operational memory
+    elif event_type == "human_decision":
+        cls += " decision"         # a human decision, recorded with its reason
+    elif event_type in ("incident", "evidence_digest"):
+        cls += " context"          # intake records for past incidents
+    return f'<span class="{cls}">{html.escape(label)}</span>'
+
+
+def _render_repository_evidence(pm):
+    """Repository evidence is shown separately from timeline evidence: it is
+    current read-only evidence from the codebase, cited as [R###]."""
+    insp = pm.get("repository_inspection") or {}
+    status = insp.get("status")
+    if status in (None, "not_configured"):
+        return
+    findings = pm.get("findings") or []
+    parts = [f'<div class="repo-section"><div class="repo-kicker">Repository evidence (read-only)</div>']
+    if status == "inspected":
+        parts.append(f'<div class="repo-status">Inspected: {html.escape(insp.get("repository_id") or "target")}. '
+                     f'Cited as [R###] — current codebase evidence, kept separate from the incident timeline '
+                     f'and from historical Hindsight memory.</div>')
+        for f in findings:
+            ftype = str(f.get("type") or "inference")
+            ids = " ".join(f'<span class="rev-id">{html.escape(str(i))}</span>' for i in (f.get("evidence_ids") or []))
+            parts.append(f'<div class="rev-item"><span class="rev-badge {ftype}">{html.escape(ftype.upper())}</span>'
+                         f'{html.escape(str(f.get("statement") or ""))} {ids}</div>')
+        proposal = pm.get("patch_proposal")
+        if proposal:
+            parts.append(f'<div class="rev-item"><span class="rev-badge recommendation">PATCH PROPOSAL</span>'
+                         f'{html.escape(str(proposal.get("file") or ""))} — '
+                         f'{html.escape(str(proposal.get("proposed_change") or ""))} '
+                         f'<span class="rev-id">(proposal only · never applied)</span></div>')
+        elif pm.get("patch_proposal_rejection"):
+            parts.append(f'<div class="rev-item"><span class="rev-badge hypothesis">PATCH REJECTED</span>'
+                         f'{html.escape(str(pm["patch_proposal_rejection"]))}</div>')
+        cand = pm.get("patch_candidate") or {}
+        if cand.get("status") and cand.get("status") != "skipped":
+            parts.append(f'<div class="repo-status">Patch candidate: '
+                         f'{html.escape(str(cand.get("status")))}{" — candidate worktree modified, original repo unchanged" if cand.get("candidate_modified") else ""}</div>')
+    elif status == "unavailable":
+        parts.append(f'<div class="repo-status">Unavailable: {html.escape(str(insp.get("error") or "unknown error"))}. '
+                     f'The analysis continued on timeline evidence only.</div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
 def render_report(pm, tl, iid):
     conf = (pm.get("confidence") or "").lower()
     conf_label = {"high":"HIGH CONFIDENCE","medium":"MEDIUM CONFIDENCE","low":"LOW CONFIDENCE"}.get(conf,"—")
@@ -826,6 +1023,14 @@ def render_report(pm, tl, iid):
   <div class="rc-body">{pm.get('summary','')}</div>
 </div>
 """, unsafe_allow_html=True)
+
+    flow = trust_flow(pm, _live_wf_status(pm))
+    if flow:
+        st.markdown(flow, unsafe_allow_html=True)
+
+    repo_html = _render_repository_evidence(pm)
+    if repo_html:
+        st.markdown(repo_html, unsafe_allow_html=True)
 
     st.markdown('<div class="report-card">', unsafe_allow_html=True)
     tabs = st.tabs(["Factors & Patterns", "Timeline", "Evidence", "Actions", "Memory"])
@@ -924,10 +1129,25 @@ def render_report(pm, tl, iid):
             st.markdown('<div class="sec-heading">How memory influenced this analysis</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="similar-item">{html.escape(str(pm["memory_influence"]))}</div>', unsafe_allow_html=True)
         if memories:
-            st.markdown('<div class="sec-heading">Recalled historical memory</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sec-heading">Recalled historical memory (Hindsight)</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="mem-note">ADVISORY ONLY — prior validated experience, never evidence about this '
+                        f'incident, never authorization. Green = learned from a verified outcome.</div>',
+                        unsafe_allow_html=True)
             st.markdown("".join(
-                f'<div class="similar-item">{html.escape(" · ".join(x for x in (m.get("incident_id"), m.get("event_type")) if x))}'
+                f'<div class="similar-item">{_mem_badge(m.get("event_type"))}'
+                f'<span style="color:#5a4fa0;">{html.escape(str(m.get("incident_id") or "?"))}</span>'
                 f' — {html.escape(str(m.get("text", "")))}</div>' for m in memories), unsafe_allow_html=True)
+        retained = pm.get("memory_retention") or []
+        if retained:
+            st.markdown('<div class="sec-heading">Recorded for this incident</div>', unsafe_allow_html=True)
+            st.markdown("".join(
+                f'<div class="similar-item">{_mem_badge(o.get("event_type"))}'
+                f'{html.escape(str(o.get("document_id") or ""))}'
+                f'<span style="color:#9c9189;"> — {html.escape(str(o.get("status") or ""))}</span></div>'
+                for o in retained), unsafe_allow_html=True)
+            st.markdown(f'<div class="mem-note">Only intake milestones (incident received, evidence digest) are '
+                        f'automatically recorded. Diagnoses and recommendations are never stored until a human '
+                        f'validates them.</div>', unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1002,8 +1222,11 @@ def render_approval_panel(pm, iid):
         st.info("No approval workflow: the AI agent did not run for this report.")
         return
     if pm.get("proposal_rejection"):
-        st.error(f"The AI's remediation proposal was invalid and never entered the approval workflow: "
-                 f"{pm['proposal_rejection'].get('reason')}")
+        st.markdown(
+            '<div class="gate no"><span class="gate-icon">⛔</span>'
+            '<div>The AI\'s remediation proposal was invalid and never entered the approval workflow: '
+            f'<b>{html.escape(str(pm["proposal_rejection"].get("reason") or ""))}</b> — no approval was created, '
+            'and nothing can run.</div></div>', unsafe_allow_html=True)
         return
     approval_ref = pm.get("approval") or {}
     thread_id = (pm.get("workflow") or {}).get("thread_id")
@@ -1019,6 +1242,24 @@ def render_approval_panel(pm, iid):
     approval, audit = rec["approval"], rec.get("audit") or []
     payload = approval.get("payload") or {}
     remediation = payload.get("remediation")
+
+    status_ = approval.get("status")
+    gate_cls, gate_icon, gate_msg = "gate", "🔒", {
+        "pending": ("The workflow is paused at the approval boundary — <b>nothing executes while the approval is "
+                    "pending.</b> A resume attempt before a human decision is refused by the backend."),
+        "approved": ("Approved by a human. The workflow still runs only when explicitly resumed; execution then "
+                     "happens only after the approval is atomically consumed."),
+        "consumed": ("The approval was <b>consumed exactly once</b> and the approved action ran. It can never "
+                     "authorize a second execution."),
+        "rejected": ("Rejected by a human — <b>nothing was executed</b>."),
+        "expired": ("This approval expired before a decision — <b>nothing was executed</b>."),
+    }.get(status_, ("The approval is recorded in the application database with an audit trail.",))[0]
+    if status_ in ("approved", "consumed"):
+        gate_cls, gate_icon = "gate ok", "✅"
+    elif status_ in ("rejected", "expired"):
+        gate_cls, gate_icon = "gate no", "⛔"
+    st.markdown(f'<div class="{gate_cls}"><span class="gate-icon">{gate_icon}</span>'
+                f'<div>{gate_msg}</div></div>', unsafe_allow_html=True)
 
     # 1. AI recommendation — exactly the payload whose hash the approval covers
     _step(1, "AI recommendation (proposed, not executed)",
@@ -1043,7 +1284,6 @@ def render_approval_panel(pm, iid):
                    "(simulator scenarios: INC-SIM-001 … INC-SIM-004).")
 
     # 2. Human decision
-    status_ = approval.get("status")
     _step(2, "Human decision", "Required before anything can run. Recorded in the approval database with an audit trail.")
     badge = {"pending": st.warning, "approved": st.success, "consumed": st.success,
              "rejected": st.error, "expired": st.error}.get(status_, st.info)
@@ -1167,7 +1407,11 @@ st.markdown(f"""
   <div class="hero-tag"><span class="hero-tag-dot"></span>Incident Intelligence</div>
   <div class="hero-h1">Signal over noise.<br><span class="accent">Root cause, with evidence.</span></div>
   <div class="hero-body">
-    Feed it server logs, Slack threads, Jira tickets. Get back a complete post-mortem — root cause, timeline, evidence, action items — powered by a LangGraph agent with retrieval over the incident's own evidence.
+    Feed it server logs, Slack threads, Jira tickets. Get back a complete post-mortem — root cause, timeline, evidence, action items — powered by a LangGraph agent with retrieval over the incident's own evidence and long-term operational memory.
+  </div>
+  <div class="mode-strip" style="margin-bottom:1.1rem;">
+    <span class="mode-strip-icon">🛡</span>
+    <span class="mode-strip-text"><b>AI proposes · Memory informs · Humans authorize · System verifies.</b> Hindsight is advisory only — it never approves or runs anything, and only verified outcomes are learned.</span>
   </div>
   <div class="hero-stats">
     <div class="hero-stat"><div class="hero-stat-num">{SIGNATURE_COUNT}</div><div class="hero-stat-label">signatures</div></div>
@@ -1215,6 +1459,11 @@ if is_demo:
 <div class="mode-strip">
   <span class="mode-strip-icon">⚡</span>
   <span class="mode-strip-text"><b>Demo scenario:</b> P1 DB connection pool exhaustion — order-service v2.4.1 · 34 log lines · 12 Slack messages · 3 tickets.</span>
+</div>
+<div class="demo-callout">
+  <strong>How to demo the learning loop:</strong> analyze <strong>INC-SIM-001</strong>, approve the recommended action,
+  let it execute and verify, then analyze <strong>INC-SIM-002</strong> — it recalls INC-SIM-001's validated
+  operational memory as advisory context (shown separately from current evidence).
 </div>
 """, unsafe_allow_html=True)
     with st.expander("Preview source data", expanded=False):
@@ -1314,7 +1563,7 @@ st.markdown("""
 <div style="text-align:center;padding:4rem 0 2rem;
             font-family:'DM Mono',monospace;font-size:0.6rem;
             color:#c4bdb4;letter-spacing:0.1em;">
-  INCIDENT ANALYSIS · LANGGRAPH · CHROMADB · GPT-4O · FASTAPI · STREAMLIT
+  INCIDENT ANALYSIS · LANGGRAPH · CHROMADB · HINDSIGHT · FASTAPI · STREAMLIT
 </div>
 """, unsafe_allow_html=True)
 
