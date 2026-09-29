@@ -1,20 +1,9 @@
-# Environment / secrets
 .env
-.env.*
-!.env.example
-
-# Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-.pytest_cache/
-
-# Local data stores
 chroma_db/
-# Approval records and paused-workflow checkpoints (SQLite)
-var/
-
-# Logs / OS
-*.log
 .DS_Store
+*.log.env
+var/
