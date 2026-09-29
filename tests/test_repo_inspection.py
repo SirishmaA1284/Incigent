@@ -319,6 +319,26 @@ class TestGit:
         assert commits[0]["changed_files"] == [{"type": "modify", "path": "src/auth.py"}]
         assert commits[0]["author"] == "Dev" and "example.com" not in json.dumps(commits)
 
+    def test_commit_text_is_redacted_before_it_becomes_evidence(self, repo, client):
+        """Commit subjects/authors are repository content: they get the same
+        code-aware redaction as file contents and diffs, for the model
+        evidence AND the API-facing Git evidence."""
+        secret, token = "sk-live-abcdefghijklmnopqrstuvwx", "ghp_abcdefghijklmnopqrstuvwxyz0123"
+        (repo / "rotate.txt").write_text("x")
+        porcelain.add(str(repo), paths=[str(repo / "rotate.txt")])
+        porcelain.commit(str(repo), message=f"rotate key {secret}\n\nbody".encode(),
+                         author=f"{token} <bot@example.com>".encode(), committer=b"Dev <dev@example.com>")
+        insp = RepositoryInspector(str(repo))
+        api_view = run_operation(insp, {"operation": "inspect_recent_commits", "count": 1})
+        assert api_view["recent_commits"][0]["summary"] == "rotate key [REDACTED]"
+        assert api_view["recent_commits"][0]["author"] == "[REDACTED]"
+        result = collect_repository_evidence(insp, []).to_dict()
+        for text in (json.dumps(api_view), json.dumps(result), format_repository_context(result)):
+            assert secret not in text and token not in text
+        assert "rotate key [REDACTED]" in format_repository_context(result)
+        body = client.get("/repositories/svc/git").text
+        assert secret not in body and token not in body and "rotate key [REDACTED]" in body
+
     def test_diff_is_read_only_and_redacted(self, tmp_path):
         repo = make_repo(tmp_path, dirty=True)
         insp = RepositoryInspector(str(repo))
@@ -434,6 +454,145 @@ class TestGitConfigSafety:
         (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
         (repo / ".git" / "objects" / "info" / "http-alternates").write_text("https://example.invalid/objects\n")
         assert refused(RepositoryInspector(str(repo)), {"operation": "inspect_recent_commits", "count": 1}) == "unsafe_gitdir"
+
+    # ── object alternates are refused outright (dulwich follows them recursively) ──
+
+    @staticmethod
+    def victim_repo(tmp_path):
+        """A repository OUTSIDE the target root holding a private blob/commit."""
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        porcelain.init(str(victim))
+        (victim / "secret.txt").write_bytes(b"PRIVATE-VICTIM-CONTENT\n")
+        porcelain.add(str(victim), paths=[str(victim / "secret.txt")])
+        sha = porcelain.commit(str(victim), message=b"victim private history",
+                               author=b"Victim <v@example.com>", committer=b"Victim <v@example.com>")
+        return victim, sha
+
+    @staticmethod
+    def point_head_at_victim(repo, victim_sha):
+        """Make the target's HEAD a commit whose tree and parent exist ONLY in
+        the victim's object store (reachable solely through alternates)."""
+        import time
+        from dulwich.objects import Commit
+        from dulwich.repo import Repo
+        with Repo(str(victim_sha[0])) as v:
+            tree = v[victim_sha[1]].tree
+        r = Repo(str(repo))
+        c = Commit()
+        c.tree, c.parents = tree, [victim_sha[1]]
+        c.author = c.committer = b"Attacker <a@example.com>"
+        c.author_time = c.commit_time = int(time.time())
+        c.author_timezone = c.commit_timezone = 0
+        c.message = b"attacker commit"
+        r.object_store.add_object(c)
+        r.refs[b"refs/heads/master"] = c.id
+        r.close()
+
+    def assert_nothing_leaks(self, repo):
+        import repo_inspection.git_read as git_read
+        insp = RepositoryInspector(str(repo))
+        for op in ({"operation": "inspect_git_status"}, {"operation": "inspect_recent_commits", "count": 5},
+                   {"operation": "inspect_diff"}):
+            assert refused(insp, op) == "unsafe_gitdir"
+        with pytest.raises(git_read.UnsafeGitDirectory):
+            git_read._open(repo)                        # Stage 6 materialisation uses this too
+        result = collect_repository_evidence(insp, [])
+        blob = json.dumps(result.to_dict()) + format_repository_context(result.to_dict())
+        assert "victim private history" not in blob and "PRIVATE-VICTIM-CONTENT" not in blob
+        assert "Victim" not in blob and any("git metadata refused" in w for w in result.warnings)
+
+    def test_in_root_alternates_are_refused(self, tmp_path):
+        repo = make_repo(tmp_path)
+        store = repo / "vendor" / "objs"
+        (store / "info").mkdir(parents=True)
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "objects" / "info" / "alternates").write_bytes(b"../../vendor/objs\n")
+        assert refused(RepositoryInspector(str(repo)), {"operation": "inspect_git_status"}) == "unsafe_gitdir"
+
+    def test_chained_alternates_cannot_reach_an_external_object_store(self, tmp_path):
+        """in-root alternate -> in-root alternate -> external repository objects."""
+        victim = self.victim_repo(tmp_path)
+        repo = make_repo(tmp_path / "t")
+        first, second = repo / "vendor" / "a", repo / "vendor" / "b"
+        (first / "info").mkdir(parents=True)
+        (second / "info").mkdir(parents=True)
+        (first / "info" / "alternates").write_bytes(b"../b\n")
+        (second / "info" / "alternates").write_bytes(str(victim[0] / ".git" / "objects").encode() + b"\n")
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "objects" / "info" / "alternates").write_bytes(b"../../vendor/a\n")
+        self.point_head_at_victim(repo, victim)
+        self.assert_nothing_leaks(repo)
+
+    def test_alternate_with_its_own_external_alternates_is_not_followed(self, tmp_path):
+        victim = self.victim_repo(tmp_path)
+        repo = make_repo(tmp_path / "t")
+        store = repo / "vendor" / "objs"
+        (store / "info").mkdir(parents=True)
+        (store / "info" / "alternates").write_bytes(str(victim[0] / ".git" / "objects").encode() + b"\n")
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "objects" / "info" / "alternates").write_bytes(b"../../vendor/objs\n")
+        self.point_head_at_victim(repo, victim)
+        self.assert_nothing_leaks(repo)
+
+    def test_link_inside_an_alternate_store_is_not_followed(self, tmp_path):
+        victim = self.victim_repo(tmp_path)
+        repo = make_repo(tmp_path / "t")
+        store = repo / "vendor" / "objs"
+        store.mkdir(parents=True)
+        # every loose-object fan-out directory of the victim, linked into the in-root store
+        for fan in (victim[0] / ".git" / "objects").iterdir():
+            if len(fan.name) == 2:
+                make_outside_link(store / fan.name, fan)
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "objects" / "info" / "alternates").write_bytes(b"../../vendor/objs\n")
+        self.point_head_at_victim(repo, victim)
+        self.assert_nothing_leaks(repo)
+
+    def test_alternates_are_refused_before_dulwich_opens_anything(self, tmp_path, monkeypatch):
+        import repo_inspection.git_read as git_read
+        victim = self.victim_repo(tmp_path)
+        repo = make_repo(tmp_path / "t")
+        (repo / ".git" / "objects" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "objects" / "info" / "alternates").write_bytes(b"../../vendor/objs\n")
+        (repo / "vendor" / "objs" / "info").mkdir(parents=True)
+        (repo / "vendor" / "objs" / "info" / "alternates").write_bytes(
+            str(victim[0] / ".git" / "objects").encode() + b"\n")
+        opened = []
+        monkeypatch.setattr(git_read, "Repo", lambda *a, **k: opened.append(a) or pytest.fail("Repo() was called"))
+        for op in ({"operation": "inspect_git_status"}, {"operation": "inspect_recent_commits", "count": 1}):
+            assert refused(RepositoryInspector(str(repo)), op) == "unsafe_gitdir"
+        assert opened == []
+
+    # ── bare layouts are refused (dulwich would open the root itself as the git dir) ──
+
+    @pytest.mark.parametrize("variant", ["bare", "git_dir_without_objects"])
+    def test_bare_layout_with_external_alternates_cannot_be_inspected(self, tmp_path, monkeypatch, variant):
+        import repo_inspection.git_read as git_read
+        from dulwich.repo import Repo
+        victim = self.victim_repo(tmp_path)
+        target = tmp_path / "bare-target"
+        Repo.init_bare(str(target), mkdir=True).close()
+        (target / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (target / "objects" / "info" / "alternates").write_bytes(
+            str(victim[0] / ".git" / "objects").encode() + b"\n")
+        self.point_head_at_victim(target, victim)
+        if variant == "git_dir_without_objects":
+            (target / ".git").mkdir()      # dulwich still opens the ROOT as bare here
+        insp = RepositoryInspector(str(target))
+        meta = run_operation(insp, {"operation": "inspect_repository"})
+        assert meta["is_git"] is False and "bare" in meta["git_unsafe"]
+        for op in ({"operation": "inspect_git_status"}, {"operation": "inspect_recent_commits", "count": 5}):
+            assert refused(insp, op) == "unsafe_gitdir"
+        with pytest.raises(git_read.UnsafeGitDirectory):
+            git_read.head_info(target)
+        result = collect_repository_evidence(insp, [])
+        blob = json.dumps(result.to_dict()) + format_repository_context(result.to_dict())
+        assert "victim private history" not in blob and "PRIVATE-VICTIM-CONTENT" not in blob
+        opened = []
+        monkeypatch.setattr(git_read, "Repo", lambda *a, **k: opened.append(a) or pytest.fail("Repo() was called"))
+        assert refused(insp, {"operation": "inspect_git_status"}) == "unsafe_gitdir"
+        assert opened == []
 
     def test_link_inside_git_metadata_escaping_root_is_refused(self, tmp_path):
         """A junction/symlink inside .git (e.g. a refs or objects subdirectory)

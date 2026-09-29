@@ -18,6 +18,7 @@ from dulwich.ignore import IgnoreFilter, IgnoreFilterManager
 from dulwich.repo import Repo
 
 from repo_inspection.policy import InspectionError, InspectionLimits, is_sensitive, is_within, resolve_inside, safe_walk
+from repo_inspection.redaction import redact_code
 
 
 class NotAGitRepository(Exception):
@@ -52,17 +53,34 @@ def _pointer(file: Path) -> str:
     return lines[0].strip()
 
 
+def is_bare_layout(root: Path) -> bool:
+    """dulwich 0.22.8's own layout decision (Repo.__init__): unless `.git` is a
+    file or `.git/objects` is a directory, a root with `objects/` and `refs/`
+    is opened as a BARE repository (control dir = the root itself)."""
+    dot_git = Path(root) / ".git"
+    if os.path.isfile(dot_git) or os.path.isdir(dot_git / "objects"):
+        return False
+    return os.path.isdir(Path(root) / "objects") and os.path.isdir(Path(root) / "refs")
+
+
 def _validate_layout(root: Path) -> None:
     """Validate the Git layout BEFORE dulwich opens anything.
 
     Verified against dulwich 0.22.8: Repo() follows a `.git` gitfile (`gitdir:`),
-    a `commondir` file and `objects/info/alternates`, and reads through any
-    link/junction inside the metadata directories. Checking only after Repo()
-    returns (as before) still let the constructor read the redirected config.
-    Here every pointer is resolved by the application first, and only in-root
-    pointer files are ever read."""
+    a `commondir` file and `objects/info/alternates` (RECURSIVELY: every
+    alternate object store reads its own info/alternates), and reads through
+    any link/junction inside the metadata directories. Checking only after
+    Repo() returns (as before) still let the constructor read the redirected
+    config. Here every pointer is resolved by the application first, and only
+    in-root pointer files are ever read.
+
+    Refused outright: bare layouts (the metadata would be the inspected tree
+    itself) and ANY object alternates, because an in-root alternate store can
+    chain to, or link to, object stores outside the root."""
     root_resolved = root.resolve()
     dot_git = root / ".git"
+    if is_bare_layout(root):
+        raise UnsafeGitDirectory("bare repository layouts are not supported for inspection")
     if not os.path.lexists(dot_git):
         return                                   # not a Git repository: Repo() will say so
     if dot_git.is_file():
@@ -78,11 +96,10 @@ def _validate_layout(root: Path) -> None:
     info = common / "objects" / "info"
     if os.path.lexists(info / "http-alternates"):
         raise UnsafeGitDirectory("objects/info/http-alternates is not supported")
-    if (info / "alternates").is_file():
-        for line in (info / "alternates").read_text(encoding="utf-8", errors="replace").splitlines():
-            entry = line.strip()
-            if entry and not entry.startswith("#"):
-                _inside(root_resolved, (common / "objects" / entry), "git alternate object directory")
+    if os.path.lexists(info / "alternates"):
+        # Not parsed at all: dulwich follows alternates recursively, so even an
+        # in-root entry can chain (or link) to object stores outside the root.
+        raise UnsafeGitDirectory("objects/info/alternates is not supported")
     # No link/junction inside the metadata may lead outside the root.
     seen = 0
     for base in {control, common}:
@@ -106,6 +123,9 @@ def _open(root: Path) -> Repo:
         repo = Repo(str(root))
     except NotGitRepository as e:
         raise NotAGitRepository(str(root)) from e
+    if repo.bare:                                  # defense in depth: never inspect a bare layout
+        repo.close()
+        raise UnsafeGitDirectory("bare repository layouts are not supported for inspection")
     # Defense in depth: _validate_layout() already proved the layout stays in
     # the root before dulwich opened it; re-check what dulwich actually chose.
     # `core.worktree` is NOT honoured by dulwich 0.22.x (`Repo.path` is always
@@ -206,11 +226,13 @@ def recent_commits(root: Path, limits: InspectionLimits, count: int = 5) -> list
                     path = (ch.new.path if ch.new and ch.new.path else ch.old.path) if (ch.new or ch.old) else None
                     if path:
                         changed.append({"type": ch.type, "path": _s(path)})
+            summary = _s(c.message).strip().splitlines()[0][:200] if c.message and _s(c.message).strip() else ""
             out.append({
                 "sha": _s(c.id),
-                "author": _s(c.author).split(" <")[0],        # name only; e-mail omitted
+                # Commit text is repository content: same redaction as file contents/diffs.
+                "author": redact_code(_s(c.author).split(" <")[0]),   # name only; e-mail omitted
                 "time": datetime.fromtimestamp(c.commit_time, timezone.utc).isoformat(),
-                "summary": _s(c.message).strip().splitlines()[0][:200] if c.message else "",
+                "summary": redact_code(summary),
                 "changed_files": changed[:limits.max_list_entries],
             })
     return out

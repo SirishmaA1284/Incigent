@@ -59,7 +59,8 @@ class RepositoryInspector:
     # ── read operations ──────────────────────────────────────────────────────
     def repository_metadata(self) -> dict:
         meta = {"repository_id": self.repository_id, "repository_root": str(self.root),
-                "is_git": (self.root / ".git").exists(), "limits": self.limits.to_dict()}
+                "is_git": (self.root / ".git").exists() or git_read.is_bare_layout(self.root),
+                "limits": self.limits.to_dict()}
         if meta["is_git"]:
             try:
                 meta.update(git_read.head_info(self.root))
