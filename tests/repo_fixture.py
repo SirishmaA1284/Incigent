@@ -45,6 +45,22 @@ def make_repo(base: Path, *, dirty: bool = False) -> Path:
     return repo
 
 
+def make_custom_repo(base: Path, files: dict) -> Path:
+    """A minimal single-commit repository with the given {rel_path: bytes} files."""
+    repo = base / "custom-repo"
+    repo.mkdir(parents=True)
+    porcelain.init(str(repo))
+    paths = []
+    for rel, data in files.items():
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        paths.append(p)
+    porcelain.add(str(repo), paths=[str(p) for p in paths])
+    porcelain.commit(str(repo), message=b"initial", author=IDENTITY, committer=IDENTITY)
+    return repo
+
+
 def tree_digest(root: Path) -> dict:
     """path -> sha256 of every file INCLUDING .git internals (byte-for-byte snapshot)."""
     out = {}

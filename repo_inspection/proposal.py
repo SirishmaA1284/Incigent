@@ -14,7 +14,7 @@ import re
 from repo_inspection.policy import InspectionError, is_sensitive, validate_relative_path
 
 PROPOSAL_REQUIRED = frozenset({"file", "location", "problem", "proposed_change", "rationale", "evidence_ids"})
-PROPOSAL_OPTIONAL = frozenset({"expected_effect", "verification_plan"})
+PROPOSAL_OPTIONAL = frozenset({"expected_effect", "verification_plan", "patch"})
 FINDING_TYPES = ("observed", "inference", "hypothesis", "recommendation")
 MAX_TEXT = 2000
 MAX_PLAN_ITEMS, MAX_PLAN_TEXT = 10, 300
@@ -41,6 +41,8 @@ def validate_patch_proposal(proposal, *, known_repository_ids, inspector):
     missing, extra = PROPOSAL_REQUIRED - keys, keys - PROPOSAL_REQUIRED - PROPOSAL_OPTIONAL
     if missing or extra:
         raise InvalidProposal(f"missing {sorted(missing)} / unexpected {sorted(extra)}")
+    if "patch" in keys and not isinstance(proposal["patch"], dict):
+        raise InvalidProposal("patch must be an object (the exact change intent)")
 
     if inspector is None:
         raise InvalidProposal("no repository was inspected")
@@ -74,6 +76,7 @@ def validate_patch_proposal(proposal, *, known_repository_ids, inspector):
         "expected_effect": _text(proposal["expected_effect"], "expected_effect") if proposal.get("expected_effect") else "",
         "verification_plan": [_text(p, "verification_plan item", MAX_PLAN_TEXT) for p in plan],
         "evidence_ids": list(dict.fromkeys(ids)),
+        "patch": proposal.get("patch"),   # Stage 6 exact-change intent (validated by patching)
         # Stage 5 stops here: a description only. Nothing applies it.
         "status": "proposal_only",
         "applied": False,

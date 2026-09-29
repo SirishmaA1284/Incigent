@@ -26,6 +26,14 @@ def isolated_state_dbs(tmp_path, monkeypatch):
     # themselves; a TARGET_REPO_PATH from .env must never leak into a test.
     monkeypatch.delenv("TARGET_REPO_PATH", raising=False)
     monkeypatch.delenv("TARGET_REPO_ID", raising=False)
+    # Stage 6 patching is also explicit-configuration only; env must not leak.
+    monkeypatch.delenv("PATCH_WORKSPACE", raising=False)
+    monkeypatch.delenv("PATCH_VERIFY", raising=False)
+    monkeypatch.delenv("PATCH_MAX_FILES", raising=False)
+    monkeypatch.delenv("PATCH_MAX_LINES_ADDED", raising=False)
+    monkeypatch.delenv("PATCH_MAX_LINES_REMOVED", raising=False)
+    monkeypatch.delenv("PATCH_MAX_DIFF_BYTES", raising=False)
+    monkeypatch.delenv("ALLOW_SELF_TARGET_REPO", raising=False)
 
 
 class RealHindsightBlocked(RuntimeError):

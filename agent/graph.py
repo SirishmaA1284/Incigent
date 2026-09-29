@@ -8,6 +8,8 @@ graph (the API) build one with build_graph() and pass it to run_agent();
 tests inject their own graph or LLM the same way.
 
 Flow: recall_memory -> record_intake -> inspect_repository (read-only) -> analyst <-> tools
+      -> prepare_patch (read-only) [-> request_patch_approval -> await_patch_approval (interrupt)
+         -> validate_patch_approval -> apply_patch (consume -> candidate worktree)]
       -> propose_action -> request_approval -> await_approval (interrupt) -> validate_approval
       -> execute_remediation (validate -> consume -> apply, simulator only)
       -> verify_remediation -> record_outcome.
@@ -48,6 +50,10 @@ from agent.remediation_flow import (
     execute_remediation_node, record_outcome_node, route_after_execution, verify_remediation_node,
 )
 from agent.repository_flow import apply_repository_analysis, inspect_repository_node
+from agent.patch_flow import (
+    apply_patch_node, await_patch_approval_node, prepare_patch_node, request_patch_approval_node,
+    route_after_patch_preparation, route_after_patch_validation, validate_patch_approval_node,
+)
 
 load_dotenv(find_dotenv())
 
@@ -70,6 +76,11 @@ class AgentState(TypedDict):
     outcome_memory: dict            # what (if anything) was retained as validated memory
     proposal_rejection: dict        # set when the model's remediation was invalid (no approval created)
     repository_inspection: dict     # read-only evidence from the configured target repository ([R###])
+    patch_candidate: dict           # Stage 6: patch request / approved candidate in an isolated worktree
+    proposed_patch: Optional[dict]  # Stage 6: canonical repository_apply payload awaiting approval
+    patch_approval_request: dict    # the workflow's own repository_apply approval (from the approval DB)
+    patch_approval_resume: Any      # raw resume value; only ever used as a reference, never trusted
+    patch_approval_result: dict     # outcome of application-side validation of that approval
 
 
 tools = [search_timeline]
@@ -163,6 +174,7 @@ def build_graph(llm=None, checkpointer=None):
     graph.add_node("recall_memory", recall_memory_node)
     graph.add_node("record_intake", record_intake_node)
     graph.add_node("inspect_repository", inspect_repository_node)
+    graph.add_node("prepare_patch", prepare_patch_node)
     graph.add_node("analyst", analyst_node)
     graph.add_node("tools", ToolNode(tools))
     graph.set_entry_point("recall_memory")
@@ -175,9 +187,23 @@ def build_graph(llm=None, checkpointer=None):
     graph.add_node("validate_approval", validate_approval_node)
     graph.add_conditional_edges("analyst", should_continue, {
         "tools": "tools",
-        "end": "propose_action",
+        "end": "prepare_patch",
     })
     graph.add_edge("tools", "analyst")
+    # Stage 6: a patch is applied only after its own repository_apply approval.
+    graph.add_node("request_patch_approval", request_patch_approval_node)
+    graph.add_node("await_patch_approval", await_patch_approval_node)
+    graph.add_node("validate_patch_approval", validate_patch_approval_node)
+    graph.add_node("apply_patch", apply_patch_node)
+    graph.add_conditional_edges("prepare_patch", route_after_patch_preparation,
+                                {"request_patch_approval": "request_patch_approval",
+                                 "propose_action": "propose_action"})
+    graph.add_edge("request_patch_approval", "await_patch_approval")
+    graph.add_edge("await_patch_approval", "validate_patch_approval")
+    graph.add_conditional_edges("validate_patch_approval", route_after_patch_validation,
+                                {"await_patch_approval": "await_patch_approval",
+                                 "apply_patch": "apply_patch", "propose_action": "propose_action"})
+    graph.add_edge("apply_patch", "propose_action")
     graph.add_conditional_edges("propose_action", route_after_proposal,
                                 {"request_approval": "request_approval", "end": END})
     graph.add_edge("request_approval", "await_approval")
@@ -272,9 +298,22 @@ def _workflow(result: dict, thread_id) -> dict:
 
 
 def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
-              approvals=None, thread_id: Optional[str] = None, inspector=None) -> dict:
+              approvals=None, thread_id: Optional[str] = None, inspector=None,
+              patch_config=None) -> dict:
     """
     Run the LangGraph agent and return a structured post-mortem dict.
+
+    patch_config: a patching.PatchConfig (explicit PATCH_WORKSPACE etc.) or
+    None. When given (and an inspector is given), a valid patch proposal is
+    validated READ-ONLY and becomes a repository_apply approval request; the
+    graph pauses (patch_candidate "approval_required"). Nothing is written
+    until a human approves and resume_agent() is called with the same
+    inspector and patch_config; the approval is then consumed and the patch is
+    applied in an isolated application-created worktree at the pinned base
+    commit, diff-checked and structurally verified. Without approvals (or a
+    checkpointer) the result is "approval_unavailable" and nothing is applied.
+    The original repository is NEVER modified; nothing is committed, pushed,
+    merged or submitted as a PR. When None, patch_candidate reports "skipped".
 
     inspector: a repo_inspection.RepositoryInspector for ONE explicitly configured
     target repository, or None. Inspection is read-only; its evidence ([R###]) is
@@ -351,7 +390,7 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
         if graph is None:
             graph = build_graph()
         configurable = {"memory_recorder": recorder, "approval_service": approvals,
-                        "repository_inspector": inspector}
+                        "repository_inspector": inspector, "patch_config": patch_config}
         if getattr(graph, "checkpointer", None) is not None:
             thread_id = thread_id or f"{incident_id}:{uuid.uuid4().hex[:12]}"
             configurable["thread_id"] = thread_id
@@ -370,6 +409,9 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
                 "proposed_action": None,
                 "approval_request": {},
                 "approval_result": {},
+                "proposed_patch": None,
+                "patch_approval_request": {},
+                "patch_approval_result": {},
             },
             config={"configurable": configurable},
         )
@@ -421,6 +463,10 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
         inspection = result.get("repository_inspection") or {"status": "not_configured", "findings": []}
         postmortem["repository_inspection"] = inspection
         apply_repository_analysis(postmortem, inspection, inspector)
+        # Stage 6: the validated candidate patch (isolated worktree) or why not.
+        postmortem["patch_candidate"] = result.get("patch_candidate") or {
+            "status": "skipped", "reason": "repository patching is not configured"}
+        postmortem["patch_approval"] = dict(result.get("patch_approval_request") or {}) or None
         return postmortem
 
     except MissingAPIKeyError:
@@ -452,8 +498,16 @@ class WorkflowNotAwaitingApproval(Exception):
     """The thread does not exist or is not paused at an approval checkpoint."""
 
 
+AWAIT_NODES = ("await_approval", "await_patch_approval")
+
+
+def _awaiting(snapshot) -> bool:
+    return bool(snapshot) and any(n in (snapshot.next or ()) for n in AWAIT_NODES)
+
+
 def resume_agent(thread_id: str, approval_id: str, *, graph, approvals,
-                 executor=None, verifier=None, recorder=None) -> dict:
+                 executor=None, verifier=None, recorder=None,
+                 inspector=None, patch_config=None) -> dict:
     """
     Resume a paused workflow after a human decision. The resume value is only a
     reference ({"approval_id": ...}); the graph re-checks the approval in the
@@ -462,16 +516,23 @@ def resume_agent(thread_id: str, approval_id: str, *, graph, approvals,
     With an executor, a validated approval proceeds to execute_remediation, where
     the action runs only after consume() succeeds; the verifier then checks the
     outcome independently. recorder receives validated outcomes only.
+
+    For a workflow paused at its repository_apply approval, pass the same
+    inspector and patch_config: the patch is applied into a new candidate
+    worktree only after that approval is consumed.
     """
     config = {"configurable": {"thread_id": thread_id, "approval_service": approvals,
                                "memory_recorder": recorder, "remediation_executor": executor,
-                               "remediation_verifier": verifier}}
+                               "remediation_verifier": verifier,
+                               "repository_inspector": inspector, "patch_config": patch_config}}
     snapshot = graph.get_state(config)
-    if not snapshot or "await_approval" not in (snapshot.next or ()):
+    if not _awaiting(snapshot):
         raise WorkflowNotAwaitingApproval(f"thread {thread_id!r} is not awaiting approval")
     result = graph.invoke(Command(resume={"approval_id": str(approval_id)}), config=config)
     request = result.get("approval_request") or {}
     record = approvals.get(request.get("approval_id", "")) if request else None
+    patch_request = result.get("patch_approval_request") or {}
+    patch_record = approvals.get(patch_request.get("approval_id", "")) if patch_request else None
     return {
         "thread_id": thread_id,
         "incident_id": result.get("incident_id"),
@@ -481,6 +542,9 @@ def resume_agent(thread_id: str, approval_id: str, *, graph, approvals,
         "remediation": result.get("remediation"),
         "verification": result.get("verification"),
         "outcome_memory": result.get("outcome_memory"),
+        "patch_approval_result": result.get("patch_approval_result") or {},
+        "patch_approval": patch_record.to_dict() if patch_record else None,
+        "patch_candidate": result.get("patch_candidate"),
     }
 
 
@@ -491,7 +555,7 @@ def workflow_state(thread_id: str, *, graph) -> Optional[dict]:
     if not values:
         return None
     result = dict(values)
-    if snapshot.next and "await_approval" in snapshot.next:
+    if _awaiting(snapshot):
         result["__interrupt__"] = True
     return {
         "thread_id": thread_id,
@@ -505,4 +569,7 @@ def workflow_state(thread_id: str, *, graph) -> Optional[dict]:
         "outcome_memory": values.get("outcome_memory"),
         "proposal_rejection": values.get("proposal_rejection"),
         "repository_inspection": values.get("repository_inspection"),
+        "patch_candidate": values.get("patch_candidate"),
+        "patch_approval_request": values.get("patch_approval_request"),
+        "patch_approval_result": values.get("patch_approval_result"),
     }
