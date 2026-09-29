@@ -92,13 +92,41 @@ class MissingAPIKeyError(EnvironmentError):
     """OPENAI_API_KEY is not configured. Other OSErrors are not this."""
 
 
+# One stable session id per process: OpenAI-compatible gateways (e.g. OpenCode
+# Go) use x-opencode-session to group requests of a conversation. It identifies
+# the application, not the user, and never carries credentials.
+_OPENCODE_SESSION = f"incigent-agent-{uuid.uuid4().hex[:16]}"
+
+# Some OpenAI-compatible providers occasionally answer in prose instead of the
+# required JSON object; the analyst asks once more (bounded) before giving up.
+MAX_ANALYST_JSON_RETRIES = 2
+
+_JSON_FIX_INSTRUCTION = (
+    "Your previous response was not a single JSON object, which is required. "
+    "Respond with ONLY the JSON object described in the instructions — no prose, "
+    "no markdown fences, no commentary, and no tool calls."
+)
+
+
 def get_llm():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise MissingAPIKeyError(
             "OPENAI_API_KEY not set. Add it to your .env file or set it as an environment variable."
         )
-    return ChatOpenAI(model="gpt-4o", temperature=0, api_key=api_key).bind_tools(tools)
+    # Default: OpenAI gpt-4o. OPENAI_BASE_URL / OPENAI_MODEL point the same
+    # OpenAI-compatible chat API at another provider (e.g. an OpenCode Go
+    # gateway). Such gateways ask clients to identify themselves and to send a
+    # stable conversation id, so a custom base URL also sets an explicit user
+    # agent and a stable per-process session header.
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
+    model = os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o"
+    headers = None
+    if base_url:
+        headers = {"User-Agent": "incigent-incident-agent/1.0",
+                   "x-opencode-session": _OPENCODE_SESSION}
+    return ChatOpenAI(model=model, temperature=0, api_key=api_key, base_url=base_url,
+                      default_headers=headers).bind_tools(tools)
 
 
 def should_continue(state: AgentState):
@@ -167,8 +195,26 @@ def build_graph(llm=None, checkpointer=None):
 
     def analyst_node(state: AgentState):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-        response = llm.invoke(messages)
-        return {"messages": [response]}
+        last_response = None
+        for attempt in range(MAX_ANALYST_JSON_RETRIES + 1):
+            try:
+                response = llm.invoke(messages)
+            except Exception:
+                # A real provider error on the first call must surface; during a
+                # retry we fall back to the last answer instead of losing it.
+                if last_response is None:
+                    raise
+                break
+            last_response = response
+            if getattr(response, "tool_calls", None):
+                return {"messages": [response]}
+            content = getattr(response, "content", "")
+            if (isinstance(content, str) and attempt < MAX_ANALYST_JSON_RETRIES
+                    and _extract_json_from_text(content).get("_parse_failed")):
+                messages = messages + [response, HumanMessage(content=_JSON_FIX_INSTRUCTION)]
+                continue
+            return {"messages": [response]}
+        return {"messages": [last_response]}
 
     graph = StateGraph(AgentState)
     graph.add_node("recall_memory", recall_memory_node)

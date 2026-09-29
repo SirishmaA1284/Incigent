@@ -281,6 +281,38 @@ class TestHindsightAdapter:
                                              type=None, occurred_start="2024-01-01T00:00:00Z"))
         assert (m.incident_id, m.score, m.tags, m.occurred_at) == (None, None, (), "2024-01-01T00:00:00Z")
 
+    def test_normalize_falls_back_to_tags_when_metadata_is_empty(self):
+        # Hindsight observation-type hits carry no metadata, only the stored
+        # tags; incident_id/event_type/services must still be recovered so
+        # recall scoping (exclude the current incident) and the UI keep working.
+        m = normalize_result(SimpleNamespace(
+            text="t", metadata={}, scores=None, type="observation", occurred_start=None,
+            tags=[APP_TAG, "incident:INC-4821", "event:lesson", "service:order-service",
+                  "service:db-primary"]))
+        assert (m.incident_id, m.event_type, m.services) == ("INC-4821", "lesson", "order-service,db-primary")
+
+    def test_normalize_prefers_real_metadata_over_tags(self):
+        m = normalize_result(SimpleNamespace(
+            text="t", metadata={"incident_id": "INC-1", "event_type": "incident", "services": "auth-service"},
+            scores=None, type="world", occurred_start=None,
+            tags=[APP_TAG, "incident:INC-OTHER", "event:lesson"]))
+        assert (m.incident_id, m.event_type, m.services) == ("INC-1", "incident", "auth-service")
+
+    def test_recall_excludes_current_incident_observations_with_empty_metadata(self):
+        # A current-incident observation (no metadata, only tags) must not leak
+        # into its own recall: tag fallback restores the incident_id, so the
+        # recorder's exclusion filter sees it.
+        client = StubHindsightClient(recall_results=[
+            _hs_result(type="observation", metadata={},
+                       tags=[APP_TAG, "incident:INC-2", "event:evidence_digest"]),
+            _hs_result(type="observation", metadata={},
+                       tags=[APP_TAG, "incident:INC-1", "event:lesson"]),
+        ])
+        rec = MemoryRecorder(_adapter(client))
+        out = rec.recall_for_incident("INC-2", "connection pool exhausted")
+        assert out.status == "available"
+        assert [m.incident_id for m in out.memories] == ["INC-1"]
+
     def test_bank_not_found_means_no_memories_yet(self):
         err = Exception("Not Found")
         err.status = 404

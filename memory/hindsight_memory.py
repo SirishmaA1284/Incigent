@@ -63,19 +63,40 @@ def recall_kwargs(bank_id: str, query: str, tags: list, types, budget: str, max_
 
 
 def normalize_result(result) -> RecalledMemory:
-    """Convert a Hindsight RecallResult into an application RecalledMemory."""
+    """Convert a Hindsight RecallResult into an application RecalledMemory.
+
+    Hindsight returns two kinds of hits: documents ("world") that carry the
+    metadata/tags that were stored, and extracted observations ("observation")
+    that Hindsight synthesizes from the text — those have empty metadata. For
+    observations the application's own tags are still present, so incident_id
+    and event_type fall back to parsing the tags. This keeps recall scoping
+    (recall_for_incident excludes the current incident) and the UI working for
+    both kinds."""
     metadata = getattr(result, "metadata", None) or {}
     scores = getattr(result, "scores", None)
     final = getattr(scores, "final", None) if scores is not None else None
+    tags = tuple(getattr(result, "tags", None) or ())
+    incident_id = metadata.get("incident_id")
+    event_type = metadata.get("event_type")
+    services = metadata.get("services")
+    if not (incident_id and event_type):
+        for tag in tags:
+            if tag.startswith("incident:") and not incident_id:
+                incident_id = tag.split(":", 1)[1]
+            elif tag.startswith("event:") and not event_type:
+                event_type = tag.split(":", 1)[1]
+            elif tag.startswith("service:"):
+                svc = tag.split(":", 1)[1]
+                services = f"{services},{svc}" if services else svc
     return RecalledMemory(
         text=result.text,
         source="hindsight",
         memory_type=getattr(result, "type", None),
-        incident_id=metadata.get("incident_id"),
-        event_type=metadata.get("event_type"),
-        services=metadata.get("services"),
+        incident_id=incident_id,
+        event_type=event_type,
+        services=services,
         occurred_at=metadata.get("occurred_at") or getattr(result, "occurred_start", None),
-        tags=tuple(getattr(result, "tags", None) or ()),
+        tags=tags,
         score=float(final) if final is not None else None,
     )
 

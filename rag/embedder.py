@@ -12,7 +12,14 @@ def get_chroma_client():
     return chromadb.PersistentClient(path=CHROMA_DIR)
 
 def get_or_create_collection(name="incidents"):
+    """EMBEDDINGS_PROVIDER=local uses Chroma's built-in local embedding model
+    (no API key; downloaded once), for chat gateways that offer no embeddings
+    API. Local vectors have a different dimension, so they live in their own
+    collection. Default: OpenAI text-embedding-3-small."""
     client = get_chroma_client()
+    if os.getenv("EMBEDDINGS_PROVIDER", "openai").strip().lower() == "local":
+        ef = embedding_functions.DefaultEmbeddingFunction()
+        return client.get_or_create_collection(name=f"{name}_local", embedding_function=ef)
     ef = embedding_functions.OpenAIEmbeddingFunction(
         api_key=os.getenv("OPENAI_API_KEY"),
         model_name="text-embedding-3-small"
