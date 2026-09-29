@@ -24,6 +24,7 @@ from agent.graph import (MissingAPIKeyError, WorkflowNotAwaitingApproval, build_
 from approvals import ApprovalDenied, build_approval_service
 from memory import build_memory_recorder
 from remediation import RemediationExecutor, RemediationVerifier, SimulatedEnvironment, SimulationError
+from repo_inspection import InspectionError, build_repository_inspector, run_operation
 
 DEFAULT_CHECKPOINT_DB = os.path.join("var", "checkpoints.sqlite3")
 
@@ -45,6 +46,10 @@ async def lifespan(app: FastAPI):
     app.state.simulator = SimulatedEnvironment()
     app.state.executor = RemediationExecutor(app.state.approvals, app.state.simulator)
     app.state.verifier = RemediationVerifier(app.state.simulator)
+    # Read-only inspection of ONE explicitly configured target repository.
+    app.state.repo_inspector, reason = build_repository_inspector()
+    if app.state.repo_inspector is None:
+        print(f"[INFO] Repository inspection disabled: {reason}")
     # Build the agent graph once at startup and share it across requests.
     try:
         app.state.graph = build_graph(checkpointer=app.state.checkpointer)
@@ -162,7 +167,8 @@ async def analyze_incident(
 
     result = run_agent(incident_id, timeline, graph=graph,
                        recorder=getattr(request.app.state, "memory_recorder", None),
-                       approvals=request.app.state.approvals)
+                       approvals=request.app.state.approvals,
+                       inspector=getattr(request.app.state, "repo_inspector", None))
 
     return JSONResponse({"incident_id": incident_id, "postmortem": result})
 
@@ -289,3 +295,54 @@ def get_simulator_state(request: Request, incident_id: str, _auth=Depends(_requi
         return request.app.state.simulator.snapshot(incident_id)
     except SimulationError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+# ── Repository inspection — read-only ─────────────────────────────────────────
+# Only the repository configured via TARGET_REPO_PATH can be addressed, by its
+# TARGET_REPO_ID; no request can supply a filesystem root. There are no write,
+# patch, command or Git-mutation endpoints.
+
+_FORBIDDEN_CODES = {"sensitive_file", "outside_root", "path_traversal", "absolute_path",
+                    "git_internals", "unsafe_gitdir"}
+
+
+def _inspect(request: Request, repository_id: str, operation: dict):
+    inspector = getattr(request.app.state, "repo_inspector", None)
+    if inspector is None or repository_id != inspector.repository_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repository not found")
+    try:
+        return run_operation(inspector, operation)
+    except InspectionError as e:
+        code = (status.HTTP_403_FORBIDDEN if e.code in _FORBIDDEN_CODES
+                else status.HTTP_404_NOT_FOUND if e.code == "not_found" else 422)
+        raise HTTPException(status_code=code, detail={"code": e.code, "message": str(e)})
+
+
+@app.get("/repositories/{repository_id}")
+def get_repository(request: Request, repository_id: str, _auth=Depends(_require_auth)):
+    return _inspect(request, repository_id, {"operation": "inspect_repository"})
+
+
+@app.get("/repositories/{repository_id}/files")
+def list_repository_files(request: Request, repository_id: str, path: str = ".",
+                          max_entries: Optional[int] = None, _auth=Depends(_require_auth)):
+    op = {"operation": "list_files", "path": path}
+    if max_entries is not None:
+        op["max_entries"] = max_entries
+    return _inspect(request, repository_id, op)
+
+
+@app.get("/repositories/{repository_id}/file")
+def read_repository_file(request: Request, repository_id: str, path: str, start_line: int = 1,
+                         end_line: Optional[int] = None, _auth=Depends(_require_auth)):
+    op = {"operation": "read_file", "path": path, "start_line": start_line}
+    if end_line is not None:
+        op["end_line"] = end_line
+    return _inspect(request, repository_id, op)
+
+
+@app.get("/repositories/{repository_id}/git")
+def get_repository_git(request: Request, repository_id: str, _auth=Depends(_require_auth)):
+    status_info = _inspect(request, repository_id, {"operation": "inspect_git_status"})
+    commits = _inspect(request, repository_id, {"operation": "inspect_recent_commits", "count": 5})
+    return {**status_info, **commits}

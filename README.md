@@ -164,6 +164,37 @@ Read-only views: `GET /workflows/{thread_id}` (approval, execution and verificat
 
 ---
 
+## Read-only repository inspection
+
+The agent can inspect **one explicitly configured target repository** (`TARGET_REPO_PATH`, an absolute path; `TARGET_REPO_ID` names it). There is no default target: with the variable unset, nothing is inspected. It is never the agent's own repository unless you point it there.
+
+```
+incident → current evidence → memory recall → inspect_repository (read-only) → analyst → root cause + patch PROPOSAL
+```
+
+- **Read-only by construction.** The inspector (`repo_inspection/`) has only narrow read operations: `inspect_repository`, `list_files`, `read_file`, `inspect_git_status`, `inspect_recent_commits`, `inspect_diff` and `inspect_test_configuration`. Requests are structured (`{"operation": "read_file", "path": ..., "start_line": ..., "end_line": ...}`); unknown operations and extra fields such as `command` are rejected. There are no write, delete, rename, permission, commit, checkout, reset, merge, rebase, push or pull operations, and no command runner.
+- **The model never chooses paths.** The application decides what to read: files named in the incident's own evidence (for example stack-trace paths), recently changed files, and tests.
+- **Paths cannot escape the root.** Absolute paths, drive or UNC paths, `..`, and `.git` internals are rejected. Every path is resolved (following symlinks and Windows junctions), and the final location must stay inside the configured root. Directory walks skip links that leave the root and never loop on links pointing back inside it.
+- **Sensitive files are denied by default**, whether or not they're gitignored: `.env` and `.env.*` (except `.env.example`, `.env.sample` and similar), private keys (`*.pem`, `*.key`, `id_rsa`, …), cloud and tool credential files (`.aws/`, `.kube/`, `.npmrc`, `.git-credentials`, service-account JSON, …) and token or secret files. Secrets that appear inside ordinary source files are redacted in the evidence.
+- **Git is read-only and needs no `git` executable.** Branch, HEAD, working-tree status, recent commits (author name only, no email), changed files and the uncommitted diff are read with dulwich, a pure-Python Git library. No arbitrary Git command exists.
+- **Limits:** a maximum file size, lines per read, entries per listing and total evidence per analysis (configurable via `REPO_INSPECT_*`). Oversized or binary files return a structured "not read" result.
+- **Traceable evidence.** Each item gets a deterministic ID in collection order (`[R001]`, `[R002]`, …; `R` so it can't be confused with timeline `[E12]` IDs) and a SHA-256 fingerprint of what was observed. Analyst `findings` are typed as `observed`, `inference`, `hypothesis` or `recommendation`; an "observed" claim without valid evidence is demoted to "hypothesis".
+- **A patch proposal is a description, not a patch.** It has a fixed set of fields: file, location, problem, proposed change, rationale, expected effect, verification plan and evidence IDs. The file must exist inside the root and not be sensitive, and the proposal must cite repository evidence. Fields like `command`, `script` or `diff` are rejected. Nothing applies it, no approval is created for it, and it is marked `applied: false`. Changing a repository belongs to a later stage with its own approval.
+
+**Repository evidence vs. historical memory.** Repository evidence is *current* evidence read from the codebase now, and is shown to the model in its own section. Historical operational memory (Hindsight) is advisory past experience. Repository contents, findings and patch proposals are **not** retained to Hindsight, Hindsight plays no part in repository access, and inspection works with Hindsight unavailable.
+
+**Git metadata containment (fail closed).** Git inspection is read-only dulwich. Dulwich honours `.git` gitfile entries (`gitdir:`) and `commondir` files (the linked-worktree/submodule layout), so the inspector refuses Git operations — `unsafe_gitdir`, HTTP 403 — whenever the control or common directory resolves outside the configured root; it never follows external Git metadata. `core.worktree` is ignored by dulwich 0.22.x (the worktree is always the configured root). Only the repository's **own** ignore rules are applied (`.git/info/exclude` and per-directory `.gitignore`); global ignore files and `core.excludesFile` are deliberately not read, so a repository configuration can never point inspection at arbitrary files. `.git` pointer files never appear in listings or untracked scans.
+
+**Working-tree status limit.** Dulwich status hashes every tracked file, so beyond `REPO_INSPECT_MAX_TRACKED_FILES` (default 20 000) working-tree status and diff are refused with an explicit `limited` result (plus a warning in the collection), instead of unbounded hashing. Metadata, commits and file reads still work.
+
+**Redaction is heuristic.** The code redactor removes obvious literal secrets (credential-formatted values, private keys, bearer tokens, and sensitive-named assignments) without mangling ordinary code. It cannot catch arbitrary runtime-generated secrets; it is a heuristic, not a guarantee.
+
+**Known limitations.** Path containment is enforced at resolve time; a concurrent process could in theory swap a path between check and read (TOCTOU) — acceptable for this local single-user tool, and the code claims no atomic filesystem guarantee. Repository evidence (redacted file contents, Git status/diff) is stored in the workflow checkpoint, which must be treated as sensitive operational data (see the checkpoint warning above). Inspection never sends repository content to Hindsight.
+
+Read-only API: `GET /repositories/{id}`, `/repositories/{id}/files?path=`, `/repositories/{id}/file?path=&start_line=&end_line=`, `/repositories/{id}/git`. Only the configured repository ID is addressable, and requests cannot supply a filesystem root.
+
+---
+
 ## Evaluation
 
 `evaluation/ragas_eval.py` implements RAGAS-style string-matching metrics (faithfulness, context recall, answer relevance, citation coverage):
@@ -188,6 +219,7 @@ Without `--postmortem` it scores a built-in sample post-mortem, not live agent o
 ├── ingestion/       Log parser (signature library), Slack parser, ticket parser, timeline builder
 ├── memory/          Long-term operational memory: recorder, redaction, Hindsight adapter, test fake
 ├── rag/             Current-incident evidence: embedder, ChromaDB store, retriever
+├── repo_inspection/ Read-only target-repository inspection: policy, inspector, dulwich git reads, collector, proposal
 ├── tests/           pytest suite
 └── ui/              Streamlit interface — demo mode, filters, JSON/Markdown export
 ```

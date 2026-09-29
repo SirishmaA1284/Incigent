@@ -22,6 +22,10 @@ def isolated_state_dbs(tmp_path, monkeypatch):
     never into the repository's var/ directory."""
     monkeypatch.setenv("APPROVAL_DB_PATH", str(tmp_path / "approvals.sqlite3"))
     monkeypatch.setenv("CHECKPOINT_DB_PATH", str(tmp_path / "checkpoints.sqlite3"))
+    # Tests only ever inspect temporary fixture repositories they create
+    # themselves; a TARGET_REPO_PATH from .env must never leak into a test.
+    monkeypatch.delenv("TARGET_REPO_PATH", raising=False)
+    monkeypatch.delenv("TARGET_REPO_ID", raising=False)
 
 
 class RealHindsightBlocked(RuntimeError):

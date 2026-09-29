@@ -7,7 +7,7 @@ There is no module-level graph or LLM cache. Callers that want to reuse a
 graph (the API) build one with build_graph() and pass it to run_agent();
 tests inject their own graph or LLM the same way.
 
-Flow: recall_memory -> record_intake -> analyst <-> tools
+Flow: recall_memory -> record_intake -> inspect_repository (read-only) -> analyst <-> tools
       -> propose_action -> request_approval -> await_approval (interrupt) -> validate_approval
       -> execute_remediation (validate -> consume -> apply, simulator only)
       -> verify_remediation -> record_outcome.
@@ -47,6 +47,7 @@ from agent.approval_flow import (
 from agent.remediation_flow import (
     execute_remediation_node, record_outcome_node, route_after_execution, verify_remediation_node,
 )
+from agent.repository_flow import apply_repository_analysis, inspect_repository_node
 
 load_dotenv(find_dotenv())
 
@@ -68,6 +69,7 @@ class AgentState(TypedDict):
     verification: dict              # VerificationResult: independent check of the postcondition
     outcome_memory: dict            # what (if anything) was retained as validated memory
     proposal_rejection: dict        # set when the model's remediation was invalid (no approval created)
+    repository_inspection: dict     # read-only evidence from the configured target repository ([R###])
 
 
 tools = [search_timeline]
@@ -160,11 +162,13 @@ def build_graph(llm=None, checkpointer=None):
     graph = StateGraph(AgentState)
     graph.add_node("recall_memory", recall_memory_node)
     graph.add_node("record_intake", record_intake_node)
+    graph.add_node("inspect_repository", inspect_repository_node)
     graph.add_node("analyst", analyst_node)
     graph.add_node("tools", ToolNode(tools))
     graph.set_entry_point("recall_memory")
     graph.add_edge("recall_memory", "record_intake")
-    graph.add_edge("record_intake", "analyst")
+    graph.add_edge("record_intake", "inspect_repository")
+    graph.add_edge("inspect_repository", "analyst")
     graph.add_node("propose_action", propose_action_node)
     graph.add_node("request_approval", request_approval_node)
     graph.add_node("await_approval", await_approval_node)
@@ -268,9 +272,14 @@ def _workflow(result: dict, thread_id) -> dict:
 
 
 def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
-              approvals=None, thread_id: Optional[str] = None) -> dict:
+              approvals=None, thread_id: Optional[str] = None, inspector=None) -> dict:
     """
     Run the LangGraph agent and return a structured post-mortem dict.
+
+    inspector: a repo_inspection.RepositoryInspector for ONE explicitly configured
+    target repository, or None. Inspection is read-only; its evidence ([R###]) is
+    shown to the model separately from the timeline and historical memory, and a
+    resulting patch proposal is a validated description only — never applied.
 
     approvals: an approvals.ApprovalService. When given and the graph has a
     checkpointer, the top recommendation becomes a pending approval request and
@@ -341,7 +350,8 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
     try:
         if graph is None:
             graph = build_graph()
-        configurable = {"memory_recorder": recorder, "approval_service": approvals}
+        configurable = {"memory_recorder": recorder, "approval_service": approvals,
+                        "repository_inspector": inspector}
         if getattr(graph, "checkpointer", None) is not None:
             thread_id = thread_id or f"{incident_id}:{uuid.uuid4().hex[:12]}"
             configurable["thread_id"] = thread_id
@@ -406,6 +416,11 @@ def run_agent(incident_id: str, timeline: list, graph=None, recorder=None,
         postmortem["workflow"] = _workflow(result, thread_id)
         postmortem["approval"] = dict(result.get("approval_request") or {}) or None
         postmortem["proposal_rejection"] = result.get("proposal_rejection")
+
+        # Repository evidence (read-only) and a display-only patch proposal.
+        inspection = result.get("repository_inspection") or {"status": "not_configured", "findings": []}
+        postmortem["repository_inspection"] = inspection
+        apply_repository_analysis(postmortem, inspection, inspector)
         return postmortem
 
     except MissingAPIKeyError:
@@ -489,4 +504,5 @@ def workflow_state(thread_id: str, *, graph) -> Optional[dict]:
         "verification": values.get("verification"),
         "outcome_memory": values.get("outcome_memory"),
         "proposal_rejection": values.get("proposal_rejection"),
+        "repository_inspection": values.get("repository_inspection"),
     }
